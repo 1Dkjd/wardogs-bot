@@ -12,6 +12,7 @@ Damage model (verified against metaforge.app/wardogs/ballistics):
 """
 import math
 import os
+import re
 import time
 
 import aiohttp
@@ -50,8 +51,35 @@ class MetaForge:
     async def ballistics(self):
         return Ballistics(await self._get("ballistics", self.ttl_static))
 
+    async def patch_sources(self):
+        """Fresh (uncached) copies of everything the patch watcher snapshots. Also refreshes the command cache."""
+        return (await self._get("ballistics", 0), await self._get("database", 0),
+                await self._get("attachment-stats", 0))
+
     async def skins(self):
         return await self._get("skins", self.ttl_static)
+
+    async def vehicles(self):
+        db = await self._get("database", self.ttl_static)
+        extra = (await self._get("vehicles", self.ttl_static)).get("vehicles", {})
+        out = {}
+        for i in db.get("items", []):
+            if i.get("tab") == "vehicles" and not i.get("wip") and i.get("vehicle"):
+                out[i["slug"]] = {**i, "protection": (extra.get(i["slug"]) or {}).get("protection", [])}
+        return out
+
+    async def destroy_list(self, slug):
+        """MetaForge's 'what destroys it' ranking for a vehicle (server-rendered on its page), cached."""
+        key = f"page:vehicle:{slug}"
+        hit = self._cache.get(key)
+        if hit and time.time() - hit[0] < self.ttl_static:
+            return hit[1]
+        async with aiohttp.ClientSession(headers=UA, timeout=aiohttp.ClientTimeout(total=30)) as s:
+            async with s.get(f"{SITE}/database/vehicles/{slug}") as r:
+                r.raise_for_status()
+                rows = parse_destroy_list(await r.text())
+        self._cache[key] = (time.time(), rows)
+        return rows
 
     async def attachments(self):
         db = await self._get("database", self.ttl_static)
@@ -305,3 +333,67 @@ def spray_path(w, v_mult=1.0, h_mult=1.0):
         y += p["y"] * vk * v_mult
         pts.append((x, y))
     return pts
+
+
+# ---------------- vehicles ----------------
+_LI = re.compile(r"<li\b[^>]*>(.*?)</li>", re.S)
+_TAG = re.compile(r"<[^>]+>")
+_ROW = re.compile(r"^(?P<name>.+?)\s+(?P<dmg>[\d.,]+)\s+damage\s+(?:(?P<hits>\d+)\s+to\s+(?P<verb>destroy it|break)\s*(?P<zone>.*)|(?P<none>no effect).*)$")
+
+
+def parse_destroy_list(html):
+    """Read MetaForge's 'What destroys it' list from a vehicle page.
+    Returns [{name, damage, hits, verb, zone}] in MetaForge's order (fastest first); hits None = no effect."""
+    m = re.search(r'<div[^>]*role="tabpanel"[^>]*data-value="rounds"[^>]*>', html)
+    if not m:
+        return []
+    i = m.start()
+    j = html.find("</ul>", i)
+    out = []
+    for li in _LI.findall(html[i:j]):
+        text = " ".join(_TAG.sub(" ", li).replace("&amp;", "&").split())
+        m = _ROW.match(text)
+        if not m:
+            continue
+        out.append({"name": m["name"], "damage": float(m["dmg"].replace(",", "")),
+                    "hits": int(m["hits"]) if m["hits"] else None,
+                    "verb": "destroy" if (m["verb"] or "").startswith("destroy") else ("break" if m["verb"] else None),
+                    "zone": (m["zone"] or "").strip()})
+    return out
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower().replace("winchester", "win"))
+
+
+EXPLOSIVE_ITEMS = {"AT Mine": "at-mine", "Claymore": "claymore", "C4 Charge": "c4-charge",
+                   "IED": "improvised-explosive-device", "Stingray": "stingray"}
+
+
+def classify_sources(rows, b, items_by_slug):
+    """Tag each 'what destroys it' row with who can use it: weapons you carry, deployables, or vehicles/artillery."""
+    by_cal = {}
+    for w in b.weapons.values():
+        for k in {w.get("calibre"), *(w.get("supportedCalibres") or []), *(w.get("shells") or [])}:
+            if k:
+                by_cal.setdefault(k, []).append(w)
+    keys = {}
+    for k, c in b.calibres.items():
+        keys.setdefault(_norm(k), k)
+        if c.get("label"):
+            keys.setdefault(_norm(c["label"]), k)
+    out = []
+    for r in rows:
+        r = dict(r)
+        item = items_by_slug.get(EXPLOSIVE_ITEMS.get(r["name"], ""))
+        cal = keys.get(_norm(r["name"]))
+        users = sorted(by_cal.get(cal, []), key=lambda w: w["name"]) if cal else []
+        if item:
+            r.update(kind="gear", users=[item["name"]], icon=item.get("icon"))
+        elif users:
+            r.update(kind="weapon", users=[w["name"] for w in users],
+                     icon=items_by_slug.get(users[0]["slug"], {}).get("icon"))
+        else:
+            r.update(kind="vehicle", users=[], icon=None)
+        out.append(r)
+    return out

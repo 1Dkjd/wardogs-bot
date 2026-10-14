@@ -212,3 +212,27 @@ def market_link_view():
 async def render_help(mf):
     gold = _img(await mf.asset("ui/currency/gold"))
     return discord.File(await asyncio.to_thread(cards.help_card, gold), "wardogs-help.png")
+
+
+# ---------------- vehicles ----------------
+async def render_vehicle(mf, slug):
+    from wardogs import classify_sources
+
+    vehicles = await mf.vehicles()
+    v = vehicles[slug]
+    b = await mf.ballistics()
+    db = await mf._get("database", mf.ttl_static)
+    items = {i["slug"]: i for i in db.get("items", []) if not i.get("wip")}
+    sources = classify_sources(await mf.destroy_list(slug), b, items)
+    names = {v.get("icon")} | {s.get("icon") for s in sources if s.get("icon") and s["kind"] != "vehicle"}
+    names.discard(None)
+    datas = await asyncio.gather(*(mf.icon(n) for n in names))
+    icons = {n: _img(d) for n, d in zip(names, datas)}
+    png = await asyncio.to_thread(cards.vehicle_card, v, sources, icons)
+    return discord.File(png, "wardogs-vehicle.png")
+
+
+def vehicle_link_view(slug):
+    v = discord.ui.View(timeout=None)
+    v.add_item(discord.ui.Button(label="View on MetaForge", url=f"{SITE}/database/vehicles/{slug}"))
+    return v

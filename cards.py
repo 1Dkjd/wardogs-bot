@@ -595,6 +595,8 @@ HELP = [
     ("/compare", "/compare m4 ak74 deagle", "Up to 3 weapons, shots to kill vs every armor tier"),
     ("/ammo", "/ammo mosin nagant", "FMJ vs HP vs AP (or slug vs buckshot) for one weapon"),
     ("/weapon", "/weapon m4", "Spray pattern + best attachments for recoil"),
+    ("/vehicle", "/vehicle l2a6", "What kills a vehicle on foot, and how many hits"),
+    ("/changes", "/changes", "Latest balance patch the bot spotted (auto-posted too)"),
 ]
 
 
@@ -624,166 +626,210 @@ def help_card(gold_icon=None):
     return _png(img)
 
 
-# ---------------- loadout card ----------------
-START_CASH = 10_000  # every life starts with $10,000 to spend
+# ---------------- vehicle card ----------------
+def _hits_color(n):
+    if n is None:
+        return DIM
+    for limit, col in ((1, (87, 242, 135)), (2, (139, 227, 107)), (4, (199, 224, 79)), (8, (240, 178, 50)),
+                       (20, (240, 138, 50)), (100, (237, 91, 69))):
+        if n <= limit:
+            return col
+    return (194, 58, 58)
 
 
-def _usd(n):
-    return f"${n:,.0f}"
-
-
-def _item_tile(img, d, box, label, name, price, icon=None, sub=None, qty=None, icon_w=None):
-    _rr(d, box, fill=PANEL, r=14)
-    L, T, R, B = box
-    d.text((L + 16, T + 20), label, font=F["s"], fill=MUTED, anchor="lm")
-    if price is not None:
-        d.text((R - 16, T + 20), _usd(price), font=F["s"], fill=GOLD, anchor="rm")
-    iw = icon_w or min(110, (B - T) - 44)
-    if icon:
-        _paste_center(img, _fit(icon, iw, (B - T) - 48), L + 16 + iw / 2, (T + 38 + B) / 2 + 2)
-    tx = L + 28 + iw
-    d.text((tx, (T + B) / 2 + (2 if not sub else -6)), name + (f"  ×{qty}" if qty and qty > 1 else ""),
-           font=F["b"], fill=TEXT, anchor="lm")
-    if sub:
-        d.text((tx, (T + B) / 2 + 18), sub, font=F["s"], fill=DIM, anchor="lm")
-
-
-def loadout_card(b, A, kit, icons=None):
-    """kit: resolved loadout (see loadout.resolve). icons: {icon_name: PIL image}."""
+def vehicle_card(v, sources, icons=None):
+    """v: vehicle item (+protection). sources: classify_sources() rows in MetaForge's order."""
     icons = icons or {}
-    ic = lambda it: icons.get((it or {}).get("icon"))
+    info = v.get("vehicle") or {}
     W, pad = 1000, 32
-    H = 830
+    foot = sorted([s for s in sources if s["kind"] != "vehicle" and s["hits"] and s["damage"] >= 20],
+                  key=lambda s: (s["hits"], -s["damage"]))[:8]
+    bullets = sorted([s for s in sources if s["kind"] == "weapon" and s not in foot], key=lambda s: (s["hits"] is None, s["hits"] or 0))
+    vehs = [s for s in sources if s["kind"] == "vehicle" and s["hits"]][:6]
+    rows = (len(foot) + 1) // 2
+    H = 230 + 40 + max(1, rows) * 76 + 120 + (90 if vehs else 0) + 60
+
     img = Image.new("RGBA", (W, H), BG)
     d = ImageDraw.Draw(img)
     d.rectangle((0, 0, W, 5), fill=GOLD)
 
-    total, weight = kit["total"], kit["weight"]
+    # header
+    _rr(d, (pad, 32, pad + 260, 172), fill=PANEL, r=14)
+    if icons.get(v.get("icon")):
+        _paste_center(img, _fit(icons[v["icon"]], 236, 124), pad + 130, 102)
+    d.text((pad + 290, 62), v["name"].upper(), font=F["title"], fill=TEXT, anchor="lm")
+    d.text((pad + 292, 106), v.get("subtitle") or v.get("subcategory") or "", font=F["b"], fill=MUTED, anchor="lm")
+    x = pad + 290
+    cm = info.get("countermeasure") or {}
+    for t in (f"{info.get('health', '?')} HP", f"{info.get('seats', '?')} SEATS",
+              f"{info.get('topSpeed', '?')} KM/H" if info.get("topSpeed") else None,
+              f"${v['price']:,}" if v.get("price") else None,
+              f"{cm.get('count')} {cm.get('kind', '').upper()}" if cm.get("kind") else None):
+        if t:
+            x = _chip(d, x, 136, t)
+    prot = v.get("protection") or []
+    if prot:
+        txt = "Occupants take " + "  ·  ".join(f"{p['percent']:+d}% from {' & '.join(s.lower() for s in p['sources'])}" for p in prot)
+        d.text((pad + 290, 194), txt, font=F["s"], fill=DIM, anchor="lm")
+    tw = d.textlength("VEHICLE", font=F["s"])
+    _chip(d, W - pad - tw - 20, 44, "VEHICLE", fill=(52, 44, 22), color=GOLD)
 
-    # ---- header ----
-    d.text((pad, 58), kit["name"].upper(), font=F["title"], fill=TEXT, anchor="lm")
-    meta = "  ·  ".join(filter(None, [f"by {kit['author']}" if kit.get("author") else None] + kit.get("tags", [])))
-    d.text((pad + 2, 104), meta, font=F["m"], fill=MUTED, anchor="lm")
-    x = pad
-    x = _chip(d, x, 124, f"{weight:.1f} KG")
-    _chip(d, x, 124, f"{kit['count']} ITEMS")
+    # on foot
+    y = 230
+    d.text((pad, y + 10), "ON FOOT · FASTEST WAYS TO KILL IT", font=F["s"], fill=MUTED, anchor="lm")
+    y += 30
+    cw = (W - 2 * pad - 16) / 2
+    if not foot:
+        _rr(d, (pad, y, W - pad, y + 66), fill=PANEL, r=12)
+        d.text((W / 2, y + 33), "Nothing an infantryman carries hurts this", font=F["b"], fill=MUTED, anchor="mm")
+    for i, s in enumerate(foot):
+        col, row = i % 2, i // 2
+        bx, by = pad + col * (cw + 16), y + row * 76
+        box = (bx, by, bx + cw, by + 66)
+        _rr(d, box, fill=PANEL, r=12)
+        ic = icons.get(s.get("icon"))
+        if ic:
+            _paste_center(img, _fit(ic, 84, 46), bx + 54, by + 33)
+        label = s["users"][0] if s["kind"] == "gear" else " / ".join(s["users"][:2])
+        sub = f"{s['name']} · {s['damage']:,.0f} dmg" if s["kind"] == "weapon" else f"{s['damage']:,.0f} dmg"
+        if s.get("zone"):
+            sub += f" · {s['zone']}"
+        d.text((bx + 108, by + 23), label, font=F["b"], fill=TEXT, anchor="lm")
+        d.text((bx + 108, by + 46), sub, font=F["s"], fill=DIM, anchor="lm")
+        verb = "HIT" if s["hits"] == 1 else "HITS"
+        d.text((box[2] - 16, by + 26), str(s["hits"]), font=F["big"], fill=_hits_color(s["hits"]), anchor="rm")
+        d.text((box[2] - 16, by + 52), verb if s["verb"] == "destroy" else f"{verb} TO BREAK", font=F["s"], fill=DIM, anchor="rm")
+    y += max(1, rows) * 76 + 14
 
-    # cost block (right)
-    RX = W - pad
-    d.text((RX, 36), "COST PER LIFE", font=F["s"], fill=MUTED, anchor="rm")
-    d.text((RX, 76), _usd(total), font=F["title"], fill=GOLD if total <= START_CASH else BAD, anchor="rm")
-    bar_l, bar_r, bar_y = RX - 300, RX, 118
-    _rr(d, (bar_l, bar_y, bar_r, bar_y + 10), fill=CELL, r=5)
-    frac = min(1, total / START_CASH)
-    _rr(d, (bar_l, bar_y, bar_l + max(10, (bar_r - bar_l) * frac), bar_y + 10), fill=GOLD if total <= START_CASH else BAD, r=5)
-    note = (f"{total / START_CASH:.0%} of the $10,000 you spawn with" if total <= START_CASH
-            else f"{_usd(total - START_CASH)} over the $10,000 you spawn with")
-    d.text((RX, 142), note, font=F["s"], fill=DIM, anchor="rm")
+    # bullets
+    _rr(d, (pad, y, W - pad, y + 96), fill=PANEL, r=14)
+    d.text((pad + 18, y + 22), "BULLETS", font=F["s"], fill=MUTED, anchor="lm")
+    hurt = [s for s in bullets if s["hits"]]
+    none = [s for s in bullets if not s["hits"]]
+    x = pad + 18
+    if hurt:
+        for s in hurt[:4]:
+            lab = f"{s['name']}  {s['hits']} hits"
+            if x + d.textlength(lab, font=F["s"]) + 30 > W - pad:
+                break
+            x = _chip(d, x, y + 40, lab, fill=CELL, color=_hits_color(s["hits"]))
+    if none and not hurt:
+        d.text((pad + 18, y + 52), "Bullets do nothing to this", font=F["b"], fill=BAD, anchor="lm")
+        names = ", ".join(s["name"] for s in none[:9]) + ("…" if len(none) > 9 else "")
+        d.text((pad + 18, y + 78), names, font=F["s"], fill=DIM, anchor="lm")
+    elif none:
+        names = ", ".join(s["name"] for s in none[:7]) + ("…" if len(none) > 7 else "")
+        d.text((pad + 18, y + 82), f"No effect: {names}", font=F["s"], fill=BAD, anchor="lm")
+    elif hurt:
+        d.text((pad + 18, y + 82), "Every round does something, but bring explosives", font=F["s"], fill=DIM, anchor="lm")
+    y += 110
 
-    # ---- primary ----
-    p = kit["primary"]
-    PL, PT, PR, PB = pad, 172, 656, 452
-    _rr(d, (PL, PT, PR, PB), fill=PANEL, r=14)
-    d.text((PL + 18, PT + 22), "PRIMARY", font=F["s"], fill=MUTED, anchor="lm")
-    d.text((PR - 18, PT + 22), _usd(p["item"]["price"]), font=F["s"], fill=GOLD, anchor="rm")
-    if ic(p["item"]):
-        _paste_center(img, _fit(ic(p["item"]), 330, 120), PL + 18 + 165, PT + 104)
-    d.text((PL + 370, PT + 72), p["item"]["name"].upper(), font=F["big"], fill=TEXT, anchor="lm")
-    d.text((PL + 372, PT + 106), p["item"].get("subcategory") or "", font=F["m"], fill=MUTED, anchor="lm")
-    if p.get("ammo"):
-        am = p["ammo"]
-        if ic(am["item"]):
-            _paste_center(img, _fit(ic(am["item"]), 44, 44), PL + 394, PT + 146)
-        d.text((PL + 424, PT + 140), f"{am['label']} × {am['rounds']}", font=F["b"], fill=TEXT, anchor="lm")
-        d.text((PL + 424, PT + 160), _usd(am["price"]), font=F["s"], fill=GOLD, anchor="lm")
-    # attachments row
-    atts = p.get("attachments") or []
-    if atts:
-        n = len(atts)
-        tw = (PR - PL - 36 - (n - 1) * 10) / n
-        for i, a in enumerate(atts):
-            bx = PL + 18 + i * (tw + 10)
-            box = (bx, PT + 186, bx + tw, PB - 16)
-            _rr(d, box, fill=CELL, r=12)
-            if ic(a):
-                _paste_center(img, _fit(ic(a), tw - 60, 40), (box[0] + box[2]) / 2, box[1] + 30)
-            name = a["name"]
-            while d.textlength(name, font=F["s"]) > tw - 16 and len(name) > 4:
-                name = name[:-2]
-            if name != a["name"]:
-                name = name.rstrip() + "…"
-            d.text(((box[0] + box[2]) / 2, box[1] + 60), name, font=F["s"], fill=TEXT, anchor="mm")
-            d.text(((box[0] + box[2]) / 2, box[1] + 78), f"{A.label(a['slot'])} · {_usd(a.get('price') or 0)}",
-                   font=F["s"], fill=DIM, anchor="mm")
-
-    # ---- armor / helmet ----
-    for (it, label), (T2, B2) in zip(((kit.get("armor"), "ARMOR"), (kit.get("helmet"), "HELMET")), ((172, 306), (318, 452))):
-        if it:
-            spec = next((a for a in b.armour if a["slug"] == it["slug"]), None)
-            sub = f"blocks {spec['reduction']}% · {spec['durability']} dur" if spec else it.get("subcategory")
-            _item_tile(img, d, (672, T2, W - pad, B2), label, it["name"], it["price"], ic(it), sub, icon_w=90)
-        else:
-            _rr(d, (672, T2, W - pad, B2), fill=PANEL, r=14)
-            d.text((688, T2 + 20), label, font=F["s"], fill=MUTED, anchor="lm")
-            d.text(((672 + W - pad) / 2, (T2 + B2) / 2 + 8), "None", font=F["b"], fill=DIM, anchor="mm")
-
-    # ---- sidearm + gear ----
-    s = kit.get("sidearm")
-    if s:
-        sub = f"{s['ammo']['label']} × {s['ammo']['rounds']} · {_usd(s['ammo']['price'])}" if s.get("ammo") else None
-        _item_tile(img, d, (pad, 468, 396, 588), "SIDEARM", s["item"]["name"], s["item"]["price"], ic(s["item"]), sub, icon_w=110)
-    gear = kit.get("gear") or []
-    GL, GR = 412, W - pad
-    _rr(d, (GL, 468, GR, 588), fill=PANEL, r=14)
-    d.text((GL + 16, 488), "GEAR", font=F["s"], fill=MUTED, anchor="lm")
-    if gear:
-        gw = (GR - GL - 32 - (len(gear) - 1) * 10) / max(1, len(gear))
-        for i, g in enumerate(gear[:5]):
-            bx = GL + 16 + i * (gw + 10)
-            box = (bx, 502, bx + gw, 576)
-            _rr(d, box, fill=CELL, r=10)
-            if ic(g["item"]):
-                _paste_center(img, _fit(ic(g["item"]), 46, 46), box[0] + 32, (box[1] + box[3]) / 2)
-            name = g["item"]["name"].replace("M67 ", "").replace("Basic ", "")
-            d.text((box[0] + 62, box[1] + 26), f"{name}", font=F["s"], fill=TEXT, anchor="lm")
-            d.text((box[0] + 62, box[1] + 48), f"×{g['qty']}  ·  {_usd(g['item']['price'] * g['qty'])}", font=F["s"], fill=GOLD, anchor="lm")
-    else:
-        d.text(((GL + GR) / 2, 534), "No gear", font=F["b"], fill=DIM, anchor="mm")
-
-    # ---- in a fight ----
-    FT = 604
-    _rr(d, (pad, FT, W - pad, FT + 162), fill=PANEL, r=14)
-    w = b.weapons.get(p["item"]["slug"])
-    rnd = (p.get("ammo") or {}).get("round", "FMJ")
-    d.text((pad + 18, FT + 22), f"IN A FIGHT  ·  {p['item']['name'].upper()} + {ROUND_SHORT.get(rnd, rnd)}  ·  50 M  ·  SHOTS TO KILL",
-           font=F["s"], fill=MUTED, anchor="lm")
-    if w:
-        for ri, (zone, lab) in enumerate((("torso_upper", "Body"), ("head", "Head"))):
-            y = FT + 54 + ri * 40
-            d.text((pad + 18, y), lab, font=F["b"], fill=TEXT, anchor="lm")
-            cx = pad + 90
-            tiers = [(None, "No armor")] + [(a, f"L{a['name'].split()[1]}") for a in b.armour_for_zone(zone)]
-            for a, t in tiers:
-                h = b.hit(w, rnd, zone, a, 50)
-                if not h:
-                    continue
-                col = stk_color(h["shots"])
-                txt = f"{t}  {h['shots']}{'*' if h['breaks'] else ''}"
-                cx = _chip(d, cx, y - 14, txt, fill=CELL, color=col)
-        # recoil with the chosen attachments
-        from wardogs import spray_path
-        v = math.prod(a.get("v", 1) for a in atts) if atts else 1
-        hm = math.prod(a.get("h", 1) for a in atts) if atts else 1
-        stock, built = spray_path(w), spray_path(w, v, hm)
-        if len(stock) > 2:
-            msg = f"Recoil: climb {stock[-1][1]:.1f}° → {built[-1][1]:.1f}° with these attachments ({(v - 1) * 100:+.0f}% vertical)"
-        else:
-            msg = "Single-shot weapon: no spray pattern"
-        d.text((pad + 18, FT + 138), msg, font=F["m"], fill=GOLD if v < 0.999 else MUTED, anchor="lm")
-    else:
-        d.text((pad + 18, FT + 70), "No ballistics data for this weapon", font=F["b"], fill=DIM, anchor="lm")
+    # vehicles & artillery
+    if vehs:
+        _rr(d, (pad, y, W - pad, y + 76), fill=PANEL, r=14)
+        d.text((pad + 18, y + 22), "FROM VEHICLES & ARTILLERY", font=F["s"], fill=MUTED, anchor="lm")
+        x = pad + 18
+        for s in vehs:
+            lab = f"{s['name']}  {s['hits']}"
+            if x + d.textlength(lab, font=F["s"]) + 30 > W - pad:
+                break
+            x = _chip(d, x, y + 38, lab, fill=CELL, color=_hits_color(s["hits"]))
+        y += 90
 
     d.line((pad, H - 44, W - pad, H - 44), fill=LINE, width=1)
-    d.text((pad, H - 24), "Prices are vendor cost per life  ·  ammo priced per 10 rounds", font=F["s"], fill=DIM, anchor="lm")
+    d.text((pad, H - 24), "Hits to destroy the vehicle (or break the part named)  ·  ranked by MetaForge", font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 24), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)
+
+
+# ---------------- balance patch card ----------------
+def _fmt_stat(stat, v):
+    if v is None:
+        return "—"
+    if stat == "price":
+        return f"${v:,.0f}"
+    if stat == "reduction":
+        return f"{v:g}%"
+    if stat in ("flesh", "pen", "plate", "v", "h", "ads", "spread", "zone", "kick"):
+        return f"×{v:g}"
+    if stat == "climb":
+        return f"{v:.1f}°"
+    if stat == "moa":
+        return f"{v:g}"
+    return f"{v:,.4g}" if v < 1000 else f"{v:,.0f}"
+
+
+def patch_card(changes, detected=None, max_rows=22):
+    from datetime import datetime, timezone
+
+    W, pad, row_h = 1000, 32, 42
+    order = ["Weapons", "Ammo", "Attachments", "Armor", "Hit zones", "Vehicles", "Prices"]
+    groups = {}
+    for c in changes:
+        groups.setdefault(c["group"], []).append(c)
+    shown, rows = 0, []
+    for g in sorted(groups, key=lambda g: order.index(g) if g in order else 99):
+        items = groups[g]
+        if shown >= max_rows:
+            break
+        rows.append(("group", g, len(items)))
+        for c in items:
+            if shown >= max_rows:
+                break
+            rows.append(("row", c, None))
+            shown += 1
+    hidden = len(changes) - shown
+    H = 190 + sum(44 if r[0] == "group" else row_h for r in rows) + (40 if hidden else 0) + 60
+
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+    d.text((pad, 58), "BALANCE CHANGES", font=F["title"], fill=TEXT, anchor="lm")
+    when = datetime.fromtimestamp(detected or 0, tz=timezone.utc).strftime("%b %d, %Y") if detected else "just now"
+    d.text((pad + 2, 104), f"Spotted in MetaForge's data · {when}", font=F["m"], fill=MUTED, anchor="lm")
+    buffs = sum(1 for c in changes if c["good"] is True)
+    nerfs = sum(1 for c in changes if c["good"] is False)
+    other = len(changes) - buffs - nerfs
+    x = pad
+    x = _chip(d, x, 128, f"{len(changes)} CHANGES", fill=CELL, color=TEXT)
+    if buffs:
+        x = _chip(d, x, 128, f"▲ {buffs} BUFFS", fill=(25, 44, 32), color=GOOD)
+    if nerfs:
+        x = _chip(d, x, 128, f"▼ {nerfs} NERFS", fill=(48, 26, 26), color=BAD)
+    if other:
+        _chip(d, x, 128, f"{other} OTHER", fill=CELL, color=MUTED)
+    tw = d.textlength("PATCH ALERT", font=F["s"])
+    _chip(d, W - pad - tw - 20, 44, "PATCH ALERT", fill=(52, 44, 22), color=GOLD)
+
+    y = 180
+    for kind, a, b in rows:
+        if kind == "group":
+            d.text((pad, y + 24), f"{a.upper()}  ·  {b}", font=F["s"], fill=GOLD, anchor="lm")
+            y += 44
+            continue
+        c = a
+        _rr(d, (pad, y, W - pad, y + row_h - 6), fill=PANEL, r=10)
+        mid = y + (row_h - 6) / 2
+        d.text((pad + 16, mid), c["item"], font=F["b"], fill=TEXT, anchor="lm")
+        d.text((pad + 420, mid), c["label"], font=F["m"], fill=MUTED, anchor="lm")
+        if c["old"] is None:
+            change = f"NEW  {_fmt_stat(c['stat'], c['new'])}"
+        elif c["new"] is None:
+            change = f"{_fmt_stat(c['stat'], c['old'])}  REMOVED"
+        else:
+            change = f"{_fmt_stat(c['stat'], c['old'])}  →  {_fmt_stat(c['stat'], c['new'])}"
+        d.text((pad + 620, mid), change, font=F["b"], fill=TEXT, anchor="lm")
+        if c["pct"] is not None:
+            col = GOOD if c["good"] is True else BAD if c["good"] is False else MUTED
+            txt = f"{c['pct'] * 100:+.0f}%"
+            tw = d.textlength(txt, font=F["s"])
+            _rr(d, (W - pad - tw - 36, mid - 13, W - pad - 12, mid + 13), fill=CELL, r=13)
+            d.text((W - pad - 24, mid), txt, font=F["s"], fill=col, anchor="rm")
+        y += row_h
+    if hidden:
+        d.text((pad, y + 20), f"+ {hidden} more changes · /changes shows the latest patch any time", font=F["s"], fill=MUTED, anchor="lm")
+
+    d.line((pad, H - 44, W - pad, H - 44), fill=LINE, width=1)
+    d.text((pad, H - 24), "Green = better for whoever uses it  ·  red = worse", font=F["s"], fill=DIM, anchor="lm")
     d.text((W - pad, H - 24), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
     return _png(img)

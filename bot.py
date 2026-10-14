@@ -1,12 +1,16 @@
-"""WARDOGS Discord bot: /gold /cost /chart /compare /ammo /weapon /help + optional daily gold post."""
+"""WARDOGS Discord bot: gold, compare, ammo, weapon, vehicle and patch-change cards, plus daily/patch posts."""
+import asyncio
 import json
 import logging
 import os
+import time
 
 import discord
 from discord import app_commands
 from discord.ext import tasks
 
+import cards
+import patches
 import views
 from wardogs import RANGES, MetaForge
 
@@ -15,6 +19,8 @@ TOKEN = os.environ["DISCORD_TOKEN"]
 GUILD_ID = os.environ.get("GUILD_ID")
 # Optional: channel for the automatic daily gold post (your server).
 DAILY_CHANNEL_ID = os.environ.get("DAILY_CHANNEL_ID")
+# Optional: channel for balance-patch alerts. Falls back to the daily channel.
+PATCH_CHANNEL_ID = os.environ.get("PATCH_CHANNEL_ID") or DAILY_CHANNEL_ID
 STATE_FILE = os.environ.get("STATE_FILE", "/data/state.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -127,6 +133,25 @@ async def weapon(inter: discord.Interaction, weapon: str):
     await send_card(inter, "weapon", [w["slug"]], "FMJ", "torso_upper", 50)
 
 
+async def vehicle_autocomplete(_: discord.Interaction, current: str):
+    vs = await mf.vehicles()
+    q = (current or "").lower()
+    hits = sorted((v for v in vs.values() if q in v["name"].lower() or q in v["slug"]), key=lambda v: v["name"])
+    return [app_commands.Choice(name=v["name"], value=v["slug"]) for v in hits[:25]]
+
+
+@tree.command(description="What kills a vehicle, and how many hits it takes")
+@app_commands.describe(vehicle="Vehicle")
+@app_commands.autocomplete(vehicle=vehicle_autocomplete)
+async def vehicle(inter: discord.Interaction, vehicle: str):
+    await inter.response.defer()
+    vs = await mf.vehicles()
+    slug = vehicle if vehicle in vs else next((k for k, v in vs.items() if v["name"].lower() == vehicle.lower()), None)
+    if not slug:
+        return await error(inter, f"Couldn't find a vehicle called **{vehicle}**.")
+    await inter.followup.send(file=await views.render_vehicle(mf, slug), view=views.vehicle_link_view(slug))
+
+
 @tree.command(name="help", description="What this bot can do")
 async def help_cmd(inter: discord.Interaction):
     await inter.response.defer()
@@ -180,6 +205,45 @@ async def daily_post():
         log.warning("Daily post to channel %s failed: %s", DAILY_CHANNEL_ID, e)
 
 
+# ---------------- balance patch alerts ----------------
+watcher = patches.PatchWatcher(os.path.dirname(STATE_FILE) or "/data")
+
+
+async def _channel(cid):
+    cid = int(cid)
+    return client.get_channel(cid) or await client.fetch_channel(cid)
+
+
+@tasks.loop(hours=3)
+async def patch_watch():
+    try:
+        b, db, st = await mf.patch_sources()
+    except Exception:
+        log.exception("Patch check: couldn't fetch MetaForge data")
+        return
+    changes = watcher.check(patches.snapshot(b, db, st))
+    if not changes:
+        return
+    log.info("Balance changes detected: %d", len(changes))
+    if PATCH_CHANNEL_ID:
+        try:
+            png = await asyncio.to_thread(cards.patch_card, changes, time.time())
+            await (await _channel(PATCH_CHANNEL_ID)).send(file=discord.File(png, "wardogs-patch.png"))
+        except discord.HTTPException as e:
+            log.warning("Patch alert post failed: %s", e)
+
+
+@tree.command(description="The latest balance changes the bot spotted")
+async def changes(inter: discord.Interaction):
+    await inter.response.defer()
+    last = watcher.last()
+    if not last:
+        return await inter.followup.send("No balance changes spotted yet. The bot checks MetaForge every 3 hours "
+                                         "and posts here when weapon, ammo, armor or price stats change.")
+    png = await asyncio.to_thread(cards.patch_card, last["changes"], last["detected"])
+    await inter.followup.send(file=discord.File(png, "wardogs-patch.png"))
+
+
 @client.event
 async def on_ready():
     synced = await tree.sync()  # global: every server + user installs (can take a few minutes the first time)
@@ -190,6 +254,8 @@ async def on_ready():
     log.info("Logged in as %s in %d servers, synced %d commands", client.user, len(client.guilds), len(synced))
     if DAILY_CHANNEL_ID and not daily_post.is_running():
         daily_post.start()
+    if not patch_watch.is_running():
+        patch_watch.start()
 
 
 client.run(TOKEN, log_handler=None)
