@@ -1,4 +1,4 @@
-"""WARDOGS Discord bot: /gold /cost /chart /compare /ammo + optional daily gold post."""
+"""WARDOGS Discord bot: /gold /cost /chart /compare /ammo /weapon /help + optional daily gold post."""
 import json
 import logging
 import os
@@ -7,7 +7,6 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-import embeds
 import views
 from wardogs import RANGES, MetaForge
 
@@ -57,14 +56,14 @@ async def send_card(inter, kind, slugs, rnd, zone, rng):
 @tree.command(description="Today's gold bar exchange rate")
 async def gold(inter: discord.Interaction):
     await inter.response.defer()
-    await inter.followup.send(embed=embeds.gold_embed(await mf.market()))
+    await inter.followup.send(file=await views.render_gold(mf), view=views.market_link_view())
 
 
 @tree.command(description="What a number of gold bars costs in cash today")
 @app_commands.describe(bars="How many gold bars")
 async def cost(inter: discord.Interaction, bars: app_commands.Range[int, 1, 100000]):
     await inter.response.defer()
-    await inter.followup.send(embed=embeds.cost_embed(await mf.market(), bars))
+    await inter.followup.send(file=await views.render_cost(mf, bars), view=views.market_link_view())
 
 
 @tree.command(name="chart", description="Gold bar price history from MetaForge")
@@ -116,6 +115,24 @@ async def ammo(inter: discord.Interaction, weapon: str, zone: app_commands.Choic
     await send_card(inter, "ammo", [w["slug"]], "FMJ", zone.value if zone else "torso_upper", distance)
 
 
+@tree.command(description="Spray pattern and the best attachments for recoil")
+@app_commands.describe(weapon="Weapon")
+@app_commands.autocomplete(weapon=weapon_autocomplete)
+async def weapon(inter: discord.Interaction, weapon: str):
+    await inter.response.defer()
+    b = await mf.ballistics()
+    w = b.find_weapon(weapon)
+    if not w:
+        return await error(inter, f"Couldn't find a weapon called **{weapon}**.")
+    await send_card(inter, "weapon", [w["slug"]], "FMJ", "torso_upper", 50)
+
+
+@tree.command(name="help", description="What this bot can do")
+async def help_cmd(inter: discord.Interaction):
+    await inter.response.defer()
+    await inter.followup.send(file=await views.render_help(mf))
+
+
 @tree.error
 async def on_tree_error(inter: discord.Interaction, err: app_commands.AppCommandError):
     log.exception("Command failed", exc_info=err)
@@ -158,7 +175,7 @@ async def daily_post():
     try:
         cid = int(DAILY_CHANNEL_ID)
         channel = client.get_channel(cid) or await client.fetch_channel(cid)
-        await channel.send(embed=embeds.gold_embed(market))
+        await channel.send(file=await views.render_gold(mf), view=views.market_link_view())
     except discord.HTTPException as e:
         log.warning("Daily post to channel %s failed: %s", DAILY_CHANNEL_ID, e)
 

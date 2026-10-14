@@ -16,6 +16,7 @@ ZONES = [
     ("Lower torso", "torso_lower"), ("Pelvis", "pelvis"), ("Arm", "arm_upper"), ("Leg", "leg_thigh"),
 ]
 ROUNDS = ["FMJ", "HollowPoint", "ArmorPiercing"]
+DISTANCES = [10, 50, 100, 300]
 
 
 def _img(data):
@@ -34,7 +35,14 @@ async def render(mf, kind, slugs, rnd, zone, rng):
     weapons = [b.weapons[s] for s in slugs]
     weapon_icons = dict(zip(slugs, await asyncio.gather(*(mf.icon(names.get(s)) for s in slugs))))
 
-    if kind == "ammo":
+    if kind == "weapon":
+        w = weapons[0]
+        A = await mf.attachments()
+        picks = [r["pick"] for r in A.best_recoil_build(w)["slots"] if r["pick"]]
+        datas = await asyncio.gather(*(mf.icon(p["icon"]) for p in picks))
+        att_imgs = {p["slug"]: _img(d) for p, d in zip(picks, datas)}
+        png = await asyncio.to_thread(cards.weapon_card, b, A, w, _img(weapon_icons[w["slug"]]), att_imgs)
+    elif kind == "ammo":
         w = weapons[0]
         opts = b.ammo_options(w)
         datas = await asyncio.gather(*(mf.icon(o["icon"]) for o in opts))
@@ -73,6 +81,17 @@ class RoundButton(discord.ui.Button):
         await self.view.refresh(inter)
 
 
+class DistanceButton(discord.ui.Button):
+    def __init__(self, metres, current):
+        super().__init__(label=f"{metres} m", row=2,
+                         style=discord.ButtonStyle.primary if metres == current else discord.ButtonStyle.secondary)
+        self.metres = metres
+
+    async def callback(self, inter: discord.Interaction):
+        self.view.rng = self.metres
+        await self.view.refresh(inter)
+
+
 class CardView(discord.ui.View):
     def __init__(self, mf, kind, slugs, rnd="FMJ", zone="torso_upper", rng=50):
         super().__init__(timeout=900)
@@ -83,12 +102,18 @@ class CardView(discord.ui.View):
 
     def _build(self):
         self.clear_items()
+        if self.kind == "weapon":
+            url = f"{SITE}/database/weapons/{self.slugs[0]}"
+            self.add_item(discord.ui.Button(label="View on MetaForge", url=url, row=0))
+            return
         self.add_item(ZoneSelect(self.zone))
         if self.kind == "compare":
             for r in ROUNDS:
                 self.add_item(RoundButton(r, self.rnd))
+        for m in DISTANCES:
+            self.add_item(DistanceButton(m, self.rng))
         url = f"{SITE}/ballistics?w={','.join(self.slugs)}&round={ROUND_SHORT[self.rnd]}&range={self.rng}"
-        self.add_item(discord.ui.Button(label="View on MetaForge", url=url, row=1))
+        self.add_item(discord.ui.Button(label="MetaForge", url=url, row=2))
 
     async def refresh(self, inter: discord.Interaction):
         await inter.response.defer()
@@ -157,3 +182,33 @@ class ChartView(discord.ui.View):
         self.add_item(discord.ui.Button(label="View on MetaForge", url=f"{SITE}/market", row=0))
 
     on_timeout = CardView.on_timeout
+
+
+# ---------------- gold / cost cards ----------------
+async def render_gold(mf):
+    market = await mf.market()
+    gold = _img(await mf.asset("ui/currency/gold"))
+    png = await asyncio.to_thread(cards.gold_card, market, gold)
+    return discord.File(png, "wardogs-gold.png")
+
+
+async def render_cost(mf, bars):
+    market = await mf.market()
+    try:
+        skins = (await mf.skins()).get("skins", [])
+    except Exception:
+        skins = []
+    gold = _img(await mf.asset("ui/currency/gold"))
+    png = await asyncio.to_thread(cards.cost_card, market, bars, skins, gold)
+    return discord.File(png, "wardogs-cost.png")
+
+
+def market_link_view():
+    v = discord.ui.View(timeout=None)
+    v.add_item(discord.ui.Button(label="Gold Bar Market on MetaForge", url=f"{SITE}/market"))
+    return v
+
+
+async def render_help(mf):
+    gold = _img(await mf.asset("ui/currency/gold"))
+    return discord.File(await asyncio.to_thread(cards.help_card, gold), "wardogs-help.png")

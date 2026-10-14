@@ -87,7 +87,7 @@ def _armor_rows(b, zone):
     return rows
 
 
-def _header(img, d, b, w, icon, zone, rng, width, subtitle_extra=""):
+def _header(img, d, b, w, icon, zone, rng, width, subtitle_extra="", ctx=None):
     cal = b.calibre(w)
     # weapon icon panel
     _rr(d, (32, 32, 272, 168), fill=PANEL, r=14)
@@ -104,7 +104,7 @@ def _header(img, d, b, w, icon, zone, rng, width, subtitle_extra=""):
              f"{w['magSize']} RND" if w.get("magSize") else None]
     for t in filter(None, chips):
         x = _chip(d, x, 136, t)
-    ctx = f"{b.zones[zone].upper()} · {rng} M"
+    ctx = ctx or f"{b.zones[zone].upper()} · {rng} M"
     tw = d.textlength(ctx, font=F["s"])
     _chip(d, width - 32 - tw - 20, 44, ctx, fill=(52, 44, 22), color=GOLD)
 
@@ -296,3 +296,328 @@ def _png(img):
     img.convert("RGB").save(buf, "PNG", optimize=True)
     buf.seek(0)
     return buf
+
+
+GOOD, BAD = (87, 242, 135), (237, 91, 69)
+
+
+def _pct_chip(d, x, y, label, mult, lower_is_better=True):
+    """Chip like 'V -30%' coloured by whether the change helps. Returns new x."""
+    if abs(mult - 1) < 0.005:
+        return x
+    pct = (mult - 1) * 100
+    good = (pct < 0) == lower_is_better
+    col = GOOD if good else BAD
+    return _chip(d, x, y, f"{label} {pct:+.0f}%", fill=(25, 44, 32) if good else (48, 26, 26), color=col)
+
+
+def weapon_card(b, A, w, weapon_icon=None, att_icons=None):
+    """Recoil card: spray pattern stock vs best build, plus the best recoil attachment per slot."""
+    from wardogs import spray_path
+
+    att_icons = att_icons or {}
+    build = A.best_recoil_build(w)
+    stock, best = spray_path(w), spray_path(w, build["v"], build["h"])
+    rows = build["slots"]
+
+    W, pad = 1000, 32
+    head_h, panel_top = 196, 196
+    row_h = 92
+    panel_h = max(430, 70 + row_h * max(1, len(rows)) + 20)
+    H = panel_top + panel_h + 20 + 50 + 66
+
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+    _header(img, d, b, w, weapon_icon, None, None, W, ctx="BEST FOR RECOIL")
+
+    # ---- spray pattern panel ----
+    L, T, R, B = pad, panel_top, pad + 420, panel_top + panel_h
+    _rr(d, (L, T, R, B), fill=PANEL, r=14)
+    shots = len(stock) - 1
+    d.text((L + 20, T + 24), f"SPRAY PATTERN · {shots} SHOTS" if shots > 1 else "SPRAY PATTERN", font=F["s"], fill=MUTED, anchor="lm")
+    improved = abs(build["v"] - 1) > 0.005 or abs(build["h"] - 1) > 0.005
+    if len(stock) > 2:
+        climb = max(1e-6, max(p[1] for p in stock))
+        X_EXAG = 3  # widen horizontal drift so it's visible
+        plot_top, plot_bot = T + 70, B - 70
+        sc = (plot_bot - plot_top) / climb
+        cx = (L + R) / 2
+
+        def pt(p):
+            return (cx + p[0] * sc * X_EXAG, plot_bot - p[1] * sc)
+
+        # grid every 5 degrees
+        step = 5 if climb > 12 else 2
+        for deg in range(0, int(climb) + 1, step):
+            y = plot_bot - deg * sc
+            d.line((L + 50, y, R - 20, y), fill=(40, 44, 51), width=1)
+            d.text((L + 42, y), f"{deg}°", font=F["s"], fill=DIM, anchor="rm")
+        d.line((cx, plot_top - 10, cx, plot_bot + 8), fill=(48, 53, 61), width=1)
+        paths = ((stock, (120, 126, 136), 3), (best, GOLD, 4)) if improved else ((stock, GOLD, 4),)
+        for path, col, r_dot in paths:
+            pts = [pt(p) for p in path]
+            d.line(pts, fill=col, width=3, joint="curve")
+            for q in pts[1:]:
+                d.ellipse((q[0] - r_dot, q[1] - r_dot, q[0] + r_dot, q[1] + r_dot), fill=col)
+        # crosshair at aim point
+        o = pt((0, 0))
+        d.ellipse((o[0] - 7, o[1] - 7, o[0] + 7, o[1] + 7), outline=TEXT, width=2)
+        # end labels
+        se, be = pt(stock[-1]), pt(best[-1])
+        if improved:
+            d.text((se[0] + 12, se[1]), f"{stock[-1][1]:.1f}°", font=F["b"], fill=(150, 156, 166), anchor="lm")
+        d.text((be[0] + 12, be[1]), f"{best[-1][1]:.1f}°", font=F["b"], fill=GOLD, anchor="lm")
+        # legend
+        ly = B - 36
+        if improved:
+            d.line((L + 20, ly, L + 44, ly), fill=(120, 126, 136), width=3)
+            d.text((L + 52, ly), "Stock", font=F["s"], fill=MUTED, anchor="lm")
+            d.line((L + 110, ly, L + 134, ly), fill=GOLD, width=3)
+            d.text((L + 142, ly), "Best build", font=F["s"], fill=GOLD, anchor="lm")
+        else:
+            d.text((L + 20, ly), "Climb per spray", font=F["s"], fill=MUTED, anchor="lm")
+        d.text((R - 20, ly), "width ×3", font=F["s"], fill=DIM, anchor="rm")
+    else:
+        d.text(((L + R) / 2, (T + B) / 2 - 12), "No spray pattern", font=F["h"], fill=MUTED, anchor="mm")
+        d.text(((L + R) / 2, (T + B) / 2 + 16), "single-shot weapon, recoil applies per shot", font=F["s"], fill=DIM, anchor="mm")
+
+    # ---- best attachments panel ----
+    L2, R2 = R + 20, W - pad
+    _rr(d, (L2, T, R2, B), fill=PANEL, r=14)
+    d.text((L2 + 20, T + 24), "BEST ATTACHMENTS FOR RECOIL", font=F["s"], fill=MUTED, anchor="lm")
+    y = T + 52
+    if not rows:
+        d.text(((L2 + R2) / 2, (T + B) / 2), "No recoil attachments for this weapon", font=F["b"], fill=MUTED, anchor="mm")
+    for row in rows:
+        p = row["pick"]
+        box = (L2 + 14, y, R2 - 14, y + row_h - 10)
+        _rr(d, box, fill=CELL, r=12)
+        ic = att_icons.get(p["slug"]) if p else None
+        _rr(d, (box[0] + 10, box[1] + 10, box[0] + 72, box[3] - 10), fill=(28, 31, 36), r=10)
+        if ic:
+            _paste_center(img, _fit(ic, 54, 54), box[0] + 41, (box[1] + box[3]) / 2)
+        tx = box[0] + 86
+        d.text((tx, box[1] + 18), row["label"].upper(), font=F["s"], fill=DIM, anchor="lm")
+        if p:
+            d.text((tx, box[1] + 40), p["name"], font=F["b"], fill=TEXT, anchor="lm")
+            cx2 = tx
+            cx2 = _pct_chip(d, cx2, box[1] + 54, "VERT", p["v"])
+            cx2 = _pct_chip(d, cx2, box[1] + 54, "HORIZ", p["h"])
+            cx2 = _pct_chip(d, cx2, box[1] + 54, "ADS", p["ads"])
+            if p.get("capacity_delta"):
+                cd = p["capacity_delta"]
+                _chip(d, cx2, box[1] + 54, f"{cd:+d} RND", fill=(48, 26, 26) if cd < 0 else (25, 44, 32),
+                      color=BAD if cd < 0 else GOOD)
+            if p.get("alt"):
+                d.text((box[2] - 14, box[1] + 18), f"or {p['alt']['name']} for horizontal",
+                       font=F["s"], fill=DIM, anchor="rm")
+        else:
+            d.text((tx, box[1] + 42), "Keep stock", font=F["b"], fill=MUTED, anchor="lm")
+            d.text((tx, box[1] + 64), "no option here improves recoil", font=F["s"], fill=DIM, anchor="lm")
+        y += row_h
+
+    # ---- totals ----
+    ty = B + 20
+    _rr(d, (pad, ty, W - pad, ty + 50), fill=PANEL, r=14)
+    d.text((pad + 20, ty + 25), "FULL BUILD", font=F["s"], fill=MUTED, anchor="lm")
+    x = pad + 120
+    for label, mult in (("VERTICAL RECOIL", build["v"]), ("HORIZONTAL", build["h"]), ("SPREAD", build["spread"]),
+                        ("ADS TIME", build["ads"])):
+        nx = _pct_chip(d, x, ty + 11, label, mult)
+        x = nx if nx != x else x
+    if x == pad + 120:
+        d.text((x, ty + 25), "stock is already as steady as it gets", font=F["s"], fill=DIM, anchor="lm")
+
+    d.line((pad, H - 44, W - pad, H - 44), fill=LINE, width=1)
+    d.text((pad, H - 24), "Optics skipped (no recoil effect)  ·  vertical weighted 60%, horizontal 40%",
+           font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 24), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)
+
+
+# ---------------- gold / cost cards ----------------
+def _money(n):
+    from wardogs import money
+    return money(n)
+
+
+def _signal(market):
+    every = [p["price"] for p in market["points"]]
+    cur = market["stats"]["current"]
+    cheaper = sum(1 for v in every if v > cur) / len(every)
+    if cheaper >= 0.66:
+        return f"GOOD TIME TO BUY · cheaper than {cheaper:.0%} of days", GOOD, (23, 48, 31)
+    if cheaper >= 0.33:
+        return f"AVERAGE PRICE · cheaper than {cheaper:.0%} of days", GOLD, (52, 43, 23)
+    return f"EXPENSIVE · pricier than {1 - cheaper:.0%} of days", BAD, (51, 25, 26)
+
+
+def _change_chip(d, x, y, label, v):
+    if v is None:
+        return _chip(d, x, y, f"{label}  n/a", fill=CELL, color=MUTED)
+    col = GOOD if v < 0 else BAD if v > 0 else MUTED
+    arrow = "▼" if v < 0 else "▲" if v > 0 else "•"
+    return _chip(d, x, y, f"{label} {arrow} {abs(v) * 100:.1f}%", fill=CELL, color=col)
+
+
+def _sparkline(d, box, values, color=GOLD):
+    L, T, R, B = box
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1
+    pts = [(L + i * (R - L) / max(1, len(values) - 1), B - (v - lo) / span * (B - T)) for i, v in enumerate(values)]
+    d.polygon(pts + [(R, B), (L, B)], fill=(52, 43, 23))
+    d.line(pts, fill=color, width=3, joint="curve")
+    x, y = pts[-1]
+    d.ellipse((x - 6, y - 6, x + 6, y + 6), fill=color, outline=BG, width=2)
+
+
+def _tile(d, box, label, value, sub=None, color=TEXT):
+    _rr(d, box, fill=PANEL, r=14)
+    d.text((box[0] + 18, box[1] + 24), label, font=F["s"], fill=MUTED, anchor="lm")
+    d.text((box[0] + 18, box[1] + 58), value, font=F["h"], fill=color, anchor="lm")
+    if sub:
+        d.text((box[0] + 18, box[1] + 86), sub, font=F["s"], fill=DIM, anchor="lm")
+
+
+def gold_card(market, gold_icon=None):
+    st, pts = market["stats"], market["points"]
+    cur = st["current"]
+    prev = pts[-2]["price"] if len(pts) > 1 else None
+    avg30 = sum(p["price"] for p in pts[-30:]) / len(pts[-30:])
+    W, H, pad = 1000, 430, 32
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+
+    if gold_icon:
+        _paste_center(img, _fit(gold_icon, 92, 92), pad + 46, 84)
+    x0 = pad + 112 if gold_icon else pad
+    d.text((x0, 44), "GOLD BAR EXCHANGE", font=F["s"], fill=MUTED, anchor="lm")
+    d.text((x0 - 2, 90), f"${cur:,}", font=F["title"], fill=TEXT, anchor="lm")
+    d.text((x0, 132), "cash per gold bar", font=F["m"], fill=DIM, anchor="lm")
+
+    x = 560
+    x = _change_chip(d, x, 36, "1D", (cur - prev) / prev if prev else None)
+    x = _change_chip(d, x, 36, "7D", st["changes"].get("7d"))
+    _change_chip(d, x, 36, "30D", st["changes"].get("30d"))
+    sig, col, bg = _signal(market)
+    _chip(d, 560, 76, sig, fill=bg, color=col)
+    # 14-day sparkline under the chips
+    _sparkline(d, (566, 118, W - pad - 6, 160), [p["price"] for p in pts[-14:]])
+    d.text((W - pad, 170), "last 14 days", font=F["s"], fill=DIM, anchor="rm")
+
+    # tiles
+    tw = (W - 2 * pad - 3 * 16) / 4
+    y = 196
+    vs = (cur - avg30) / avg30
+    tiles = [
+        ("VS 30-DAY AVG", f"{vs * 100:+.0f}%", f"avg {_money(avg30)}", GOOD if vs < 0 else BAD),
+        ("ALL-TIME LOW", _money(st["min"]), "cheapest day so far", TEXT),
+        ("ALL-TIME HIGH", _money(st["max"]), "priciest day so far", TEXT),
+        ("30-BAR SKIN", _money(30 * cur), "Black & Gold AK74 today", GOLD),
+    ]
+    for i, (lab, val, sub, c) in enumerate(tiles):
+        bx = pad + i * (tw + 16)
+        _tile(d, (bx, y, bx + tw, y + 108), lab, val, sub, c)
+
+    # skin price strip
+    y2 = y + 128
+    _rr(d, (pad, y2, W - pad, y2 + 52), fill=PANEL, r=14)
+    d.text((pad + 18, y2 + 26), "SKIN PRICES TODAY", font=F["s"], fill=MUTED, anchor="lm")
+    x = pad + 180
+    for bars in (5, 10, 15, 30):
+        x = _chip(d, x, y2 + 12, f"{bars} bars = {_money(bars * cur)}", fill=CELL, color=TEXT)
+
+    d.text((pad, H - 22), "Lower = cheaper bars  ·  /chart for the full history", font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 22), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)
+
+
+def cost_card(market, bars, skins=None, gold_icon=None):
+    st = market["stats"]
+    cur = st["current"]
+    avg30 = sum(p["price"] for p in market["points"][-30:]) / len(market["points"][-30:])
+    skins = [s for s in (skins or []) if s.get("source") == "gold-market" and s.get("price")]
+    affordable = sorted([s for s in skins if s["price"] <= bars], key=lambda s: (-s["price"], s.get("name", "")))
+
+    W, pad = 1000, 32
+    H = 446 if skins else 330
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+
+    if gold_icon:
+        _paste_center(img, _fit(gold_icon, 92, 92), pad + 46, 84)
+    x0 = pad + 112 if gold_icon else pad
+    d.text((x0, 44), f"{bars:,} GOLD BAR{'S' if bars != 1 else ''} COST", font=F["s"], fill=MUTED, anchor="lm")
+    d.text((x0 - 2, 90), _money(bars * cur), font=F["title"], fill=GOLD, anchor="lm")
+    d.text((x0, 132), f"${bars * cur:,} cash at today's ${cur:,}/bar", font=F["m"], fill=DIM, anchor="lm")
+    sig, col, bg = _signal(market)
+    tw = d.textlength(sig, font=F["s"])
+    _chip(d, W - pad - tw - 20, 36, sig, fill=bg, color=col)
+
+    tw = (W - 2 * pad - 2 * 16) / 3
+    y = 170
+    for i, (lab, rate, c) in enumerate((("AT ALL-TIME LOW", st["min"], GOOD), ("AT 30-DAY AVERAGE", avg30, TEXT),
+                                        ("AT ALL-TIME HIGH", st["max"], BAD))):
+        bx = pad + i * (tw + 16)
+        diff = bars * rate - bars * cur
+        _tile(d, (bx, y, bx + tw, y + 108), lab, _money(bars * rate),
+              f"{'+' if diff >= 0 else '−'}{_money(abs(diff))} vs today", c)
+
+    if skins:
+        y2 = y + 128
+        _rr(d, (pad, y2, W - pad, y2 + 90), fill=PANEL, r=14)
+        d.text((pad + 18, y2 + 24), f"{len(affordable)} OF {len(skins)} GOLD MARKET ITEMS COST {bars} BARS OR LESS  ·  priciest first",
+               font=F["s"], fill=MUTED, anchor="lm")
+        x = pad + 18
+        if not affordable:
+            cheapest = min(s["price"] for s in skins)
+            d.text((x, y2 + 58), f"Not enough for any item yet, the cheapest costs {cheapest} bars", font=F["b"], fill=MUTED, anchor="lm")
+        for s in affordable[:4]:
+            name = f"{(s.get('target') or {}).get('name', '')} {s['name']}".strip() if isinstance(s.get("target"), dict) else s["name"]
+            label = f"{name} · {s['price']}"
+            if x + d.textlength(label, font=F["s"]) + 30 > W - pad:
+                break
+            x = _chip(d, x, y2 + 44, label, fill=CELL, color=GOLD if s["price"] == bars else TEXT)
+
+    d.text((pad, H - 22), "Converting cash to bars is final  ·  /chart to time it", font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 22), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)
+
+
+HELP = [
+    ("/gold", "/gold", "Today's gold bar rate, changes and a buy signal"),
+    ("/cost", "/cost bars:30", "Cash cost of gold bars, and which skins they cover"),
+    ("/chart", "/chart period:30d", "Gold price history  ·  7D / 30D / 90D / ALL buttons"),
+    ("/compare", "/compare m4 ak74 deagle", "Up to 3 weapons, shots to kill vs every armor tier"),
+    ("/ammo", "/ammo mosin nagant", "FMJ vs HP vs AP (or slug vs buckshot) for one weapon"),
+    ("/weapon", "/weapon m4", "Spray pattern + best attachments for recoil"),
+]
+
+
+def help_card(gold_icon=None):
+    W, pad, row_h = 1000, 32, 74
+    H = 150 + row_h * len(HELP) + 90
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+    if gold_icon:
+        _paste_center(img, _fit(gold_icon, 72, 72), pad + 36, 76)
+    x0 = pad + 92 if gold_icon else pad
+    d.text((x0, 58), "WARDOGS BOT", font=F["title"], fill=TEXT, anchor="lm")
+    d.text((x0 + 2, 104), "Gold prices, weapon stats and ammo math, straight from MetaForge", font=F["m"], fill=MUTED, anchor="lm")
+    y = 150
+    for i, (cmd, example, desc) in enumerate(HELP):
+        _rr(d, (pad, y, W - pad, y + row_h - 10), fill=PANEL, r=12)
+        d.text((pad + 20, y + (row_h - 10) / 2), cmd, font=F["h"], fill=GOLD, anchor="lm")
+        d.text((pad + 170, y + 22), desc, font=F["b"], fill=TEXT, anchor="lm")
+        d.text((pad + 170, y + 46), example, font=F["m"], fill=DIM, anchor="lm")
+        y += row_h
+    tips = "Cards have buttons: hit zone, ammo type and distance redraw in place  ·  weapon names autocomplete"
+    d.text((pad, H - 56), tips, font=F["s"], fill=MUTED, anchor="lm")
+    d.line((pad, H - 40, W - pad, H - 40), fill=LINE, width=1)
+    d.text((pad, H - 20), "Numbers match metaforge.app/wardogs/ballistics", font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 20), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)

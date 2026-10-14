@@ -50,6 +50,14 @@ class MetaForge:
     async def ballistics(self):
         return Ballistics(await self._get("ballistics", self.ttl_static))
 
+    async def skins(self):
+        return await self._get("skins", self.ttl_static)
+
+    async def attachments(self):
+        db = await self._get("database", self.ttl_static)
+        stats = await self._get("attachment-stats", self.ttl_static)
+        return Attachments(db, stats)
+
     async def icon_names(self):
         """slug -> icon name, from the item database (ballistics data has no icons)."""
         try:
@@ -223,3 +231,76 @@ def money(n):
     if n >= 10_000:
         return f"${n / 1e3:.0f}K"
     return f"${n:,.0f}"
+
+
+# ---------------- attachments / recoil ----------------
+RECOIL_SLOTS = ("Muzzle", "Underbarrel", "Magazine", "Stock", "Grip", "Pistolgrip", "Handguard", "Barrel")
+
+
+class Attachments:
+    """Attachment fit + exact stat modifiers (from /api/wardogs/attachment-stats)."""
+
+    def __init__(self, database, stats):
+        self.slot_labels = database.get("slotLabels", {})
+        items = database.get("items", [])
+        self.weapon_slots = {i["slug"]: i.get("slots") or [] for i in items if i.get("tab") == "weapons"}
+        mods = stats.get("attachments", {})
+        self.by_weapon = {}
+        for a in items:
+            if a.get("tab") != "attachments" or a.get("wip") or not a.get("slot"):
+                continue
+            m = {x["attribute"]: x["value"] for x in mods.get(a["slug"], {}).get("modifiers", [])
+                 if x.get("op") == "multiply" and x.get("scope") == "weapon"}
+            entry = {"slug": a["slug"], "name": a["name"], "slot": a["slot"], "icon": a.get("icon"),
+                     "capacity": a.get("capacity"), "v": m.get("VerticalRecoilMultiplier", 1.0),
+                     "h": m.get("HorizontalRecoilMultiplier", 1.0), "spread": m.get("SpreadMultiplier", 1.0),
+                     "ads": m.get("AimTime", 1.0)}
+            for w in a.get("fits") or []:
+                self.by_weapon.setdefault(w, []).append(entry)
+
+    def label(self, slot):
+        return self.slot_labels.get(slot, slot)
+
+    def best_recoil_build(self, w):
+        """Best attachment per slot for recoil (vertical weighted 60%, horizontal 40%), ignoring optics."""
+        options = self.by_weapon.get(w["slug"], [])
+        slots = [s for s in (self.weapon_slots.get(w["slug"]) or []) if s in RECOIL_SLOTS]
+        for s in sorted({o["slot"] for o in options if o["slot"] in RECOIL_SLOTS}):
+            if s not in slots:
+                slots.append(s)
+        build = []
+        for slot in slots:
+            cands = [o for o in options if o["slot"] == slot]
+            if not cands:
+                continue
+            score = lambda o: 0.6 * o["v"] + 0.4 * o["h"]  # climb is what you fight most, drift second
+            best = min(cands, key=lambda o: (round(score(o), 4), o["ads"]))
+            if score(best) >= 0.999:
+                best = None  # nothing in this slot helps recoil
+            pick = dict(best) if best else None
+            alt = min(cands, key=lambda o: (o["h"], o["v"]))
+            if pick and alt["slug"] != pick["slug"] and alt["h"] < pick["h"] - 0.04:
+                pick["alt"] = alt  # better horizontal control, worth mentioning
+            if pick and slot == "Magazine":
+                pick["capacity_delta"] = (pick.get("capacity") or 0) - (w.get("magSize") or pick.get("capacity") or 0)
+            build.append({"slot": slot, "label": self.label(slot), "pick": pick, "options": len(cands)})
+        v = math.prod(b["pick"]["v"] for b in build if b["pick"]) if build else 1.0
+        h = math.prod(b["pick"]["h"] for b in build if b["pick"]) if build else 1.0
+        ads = math.prod(b["pick"]["ads"] for b in build if b["pick"]) if build else 1.0
+        spread = math.prod(b["pick"]["spread"] for b in build if b["pick"]) if build else 1.0
+        return {"slots": build, "v": v, "h": h, "ads": ads, "spread": spread}
+
+
+def spray_path(w, v_mult=1.0, h_mult=1.0):
+    """Cumulative recoil path in degrees [(x, y), ...] starting at (0, 0). Empty if no pattern."""
+    pat = w.get("recoilPattern") or []
+    vk = w.get("viewKickMultiplier") or 1.0
+    attrs = w.get("attributes") or {}
+    v_mult *= attrs.get("VerticalRecoilMultiplier", 1.0)
+    h_mult *= attrs.get("HorizontalRecoilMultiplier", 1.0)
+    pts, x, y = [(0.0, 0.0)], 0.0, 0.0
+    for p in pat:
+        x += p["x"] * vk * h_mult
+        y += p["y"] * vk * v_mult
+        pts.append((x, y))
+    return pts
