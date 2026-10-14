@@ -7,10 +7,9 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-import chart
 import embeds
 import views
-from wardogs import RANGES, MetaForge, market_points
+from wardogs import RANGES, MetaForge
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 # Optional: your home server. Old server-only command copies there get cleaned up so they don't show twice.
@@ -69,19 +68,14 @@ async def cost(inter: discord.Interaction, bars: app_commands.Range[int, 1, 1000
 
 
 @tree.command(name="chart", description="Gold bar price history from MetaForge")
-@app_commands.describe(period="Time range")
+@app_commands.describe(period="Time range (you can switch with the buttons too)")
 @app_commands.choices(period=RANGE_CHOICES)
 async def chart_cmd(inter: discord.Interaction, period: app_commands.Choice[str] = None):
     await inter.response.defer()
     rng = period.value if period else "30d"
-    pts = market_points(await mf.market(), rng)
-    if len(pts) < 2:
-        return await error(inter, "Not enough price history for that range yet.")
-    png = chart.render(pts, "all time" if rng == "all" else f"last {rng}")
-    e = discord.Embed(title="🪙 Gold bar price history", url="https://metaforge.app/wardogs/market", color=embeds.GOLD)
-    e.set_image(url="attachment://gold.png")
-    e.set_footer(text=f"{len(pts)} days • MetaForge")
-    await inter.followup.send(embed=e, file=discord.File(png, "gold.png"))
+    view = views.ChartView(mf, rng)
+    file = await views.render_chart(mf, rng)
+    view.message = await inter.followup.send(file=file, view=view, wait=True)
 
 
 @tree.command(description="Compare weapons side by side, with shots to kill vs every armor tier")

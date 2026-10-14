@@ -110,3 +110,49 @@ class CardView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+
+
+# ---------------- gold chart ----------------
+CHART_RANGES = [("7D", "7d"), ("30D", "30d"), ("90D", "90d"), ("ALL", "all")]
+
+
+async def render_chart(mf, rng):
+    import chart  # local import: matplotlib is heavy and only needed here
+
+    market = await mf.market()
+    gold = _img(await mf.asset("ui/currency/gold"))
+    png = await asyncio.to_thread(chart.render, market, rng, gold)
+    return discord.File(png, "wardogs-gold.png")
+
+
+class RangeButton(discord.ui.Button):
+    def __init__(self, label, rng, current):
+        super().__init__(label=label, row=0,
+                         style=discord.ButtonStyle.primary if rng == current else discord.ButtonStyle.secondary)
+        self.rng = rng
+
+    async def callback(self, inter: discord.Interaction):
+        self.view.rng = self.rng
+        await inter.response.defer()
+        try:
+            file = await render_chart(self.view.mf, self.rng)
+        except Exception:
+            log.exception("Chart re-render failed")
+            return await inter.followup.send("⚠️ Couldn't redraw the chart right now.", ephemeral=True)
+        self.view.build()
+        await inter.edit_original_response(attachments=[file], view=self.view)
+
+
+class ChartView(discord.ui.View):
+    def __init__(self, mf, rng="30d"):
+        super().__init__(timeout=900)
+        self.mf, self.rng, self.message = mf, rng, None
+        self.build()
+
+    def build(self):
+        self.clear_items()
+        for label, rng in CHART_RANGES:
+            self.add_item(RangeButton(label, rng, self.rng))
+        self.add_item(discord.ui.Button(label="View on MetaForge", url=f"{SITE}/market", row=0))
+
+    on_timeout = CardView.on_timeout

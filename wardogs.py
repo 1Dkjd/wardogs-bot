@@ -18,7 +18,7 @@ import aiohttp
 
 API = "https://metaforge.app/api/wardogs"
 SITE = "https://metaforge.app/wardogs"
-ICON_URL = "https://static.metaforge.app/wardogs/icons"
+STATIC = "https://static.metaforge.app/wardogs"
 ICON_DIR = os.environ.get("ICON_DIR", "/data/icons")
 UA = {"User-Agent": "Mozilla/5.0 (wardogs-discord-bot; personal use)"}
 
@@ -56,21 +56,23 @@ class MetaForge:
         return {i["slug"]: i["icon"] for i in db.get("items", []) if i.get("icon")}
 
     async def icon(self, name):
-        """Raw image bytes for an icon, cached on disk. Returns None if unavailable."""
-        if not name:
-            return None
-        path = os.path.join(ICON_DIR, f"{name}.webp")
-        if os.path.exists(path):
-            with open(path, "rb") as f:
+        """Item icon (weapons, ammo) as raw bytes, cached on disk. None if unavailable."""
+        return await self.asset(f"icons/{name}") if name else None
+
+    async def asset(self, path):
+        """Any MetaForge static image, e.g. 'ui/currency/gold'. Cached on disk."""
+        cache = os.path.join(ICON_DIR, path.replace("/", "_") + ".webp")
+        if os.path.exists(cache):
+            with open(cache, "rb") as f:
                 return f.read()
         try:
             async with aiohttp.ClientSession(headers=UA, timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.get(f"{ICON_URL}/{name}.webp") as r:
+                async with s.get(f"{STATIC}/{path}.webp") as r:
                     if r.status != 200:
                         return None
                     data = await r.read()
             os.makedirs(ICON_DIR, exist_ok=True)
-            with open(path, "wb") as f:
+            with open(cache, "wb") as f:
                 f.write(data)
             return data
         except Exception:
