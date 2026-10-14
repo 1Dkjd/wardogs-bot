@@ -1,0 +1,10 @@
+services:
+  wardogs-bot:
+    build: .
+    container_name: wardogs-bot
+    restart: unless-stopped
+    env_file: .env          # DISCORD_TOKEN, GUILD_ID, DAILY_CHANNEL_ID live here (never committed)
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - ./data:/data        # icon cache + daily-post state

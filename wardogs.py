@@ -1,0 +1,220 @@
+"""MetaForge WARDOGS data client + damage math.
+
+Damage model (verified against metaforge.app/wardogs/ballistics):
+  per_hit = baseDamage * zoneMult * falloff(range) * roundMult
+  roundMult = combat[round].bare                              (zone not covered by armor)
+            = combat[round].vsTier[tier] * (1 - reduction% * penScalar)   (zone covered)
+  plate wear per hit = baseDamage * falloff * plateArmor (or plateHelmet);
+  once the plate's durability hits 0, later shots deal the unarmored (bare) damage.
+  shots   = hits until health <= 0
+  ttk     = (shots - 1) * 60 / rpm + travel time (range / velocity, +1% for drag)
+  buckshot multiplies damage and plate wear by the pellet count (all pellets hit)
+"""
+import math
+import os
+import time
+
+import aiohttp
+
+API = "https://metaforge.app/api/wardogs"
+SITE = "https://metaforge.app/wardogs"
+ICON_URL = "https://static.metaforge.app/wardogs/icons"
+ICON_DIR = os.environ.get("ICON_DIR", "/data/icons")
+UA = {"User-Agent": "Mozilla/5.0 (wardogs-discord-bot; personal use)"}
+
+ROUND_SHORT = {"FMJ": "FMJ", "HollowPoint": "HP", "ArmorPiercing": "AP"}
+DEFAULT_COMBAT = {"bare": 1, "penScalar": 1, "vsTier": {}, "plateArmor": 0.4, "plateHelmet": 0.4}
+HIDDEN_WEAPONS = {"leapord-barrel-test"}
+
+
+class MetaForge:
+    def __init__(self, ttl_market=300, ttl_static=6 * 3600):
+        self._cache = {}
+        self.ttl_market = ttl_market
+        self.ttl_static = ttl_static
+
+    async def _get(self, path, ttl):
+        hit = self._cache.get(path)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        async with aiohttp.ClientSession(headers=UA, timeout=aiohttp.ClientTimeout(total=30)) as s:
+            async with s.get(f"{API}/{path}") as r:
+                r.raise_for_status()
+                data = await r.json(content_type=None)
+        self._cache[path] = (time.time(), data)
+        return data
+
+    async def market(self):
+        return await self._get("market", self.ttl_market)
+
+    async def ballistics(self):
+        return Ballistics(await self._get("ballistics", self.ttl_static))
+
+    async def icon_names(self):
+        """slug -> icon name, from the item database (ballistics data has no icons)."""
+        db = await self._get("database", self.ttl_static)
+        return {i["slug"]: i["icon"] for i in db.get("items", []) if i.get("icon")}
+
+    async def icon(self, name):
+        """Raw image bytes for an icon, cached on disk. Returns None if unavailable."""
+        if not name:
+            return None
+        path = os.path.join(ICON_DIR, f"{name}.webp")
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                return f.read()
+        try:
+            async with aiohttp.ClientSession(headers=UA, timeout=aiohttp.ClientTimeout(total=15)) as s:
+                async with s.get(f"{ICON_URL}/{name}.webp") as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.read()
+            os.makedirs(ICON_DIR, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            return data
+        except Exception:
+            return None
+
+
+class Ballistics:
+    def __init__(self, raw):
+        self.raw = raw
+        self.health = raw.get("assumedHealth", 100)
+        self.weapons = {w["slug"]: w for w in raw["weapons"] if w["slug"] not in HIDDEN_WEAPONS}
+        self.calibres = raw["calibres"]
+        self.zones = {h["key"]: h["label"] for h in raw["hitLocations"]}
+        self.armour = raw["armour"]
+
+    # ---------- lookups ----------
+    def find_weapon(self, q):
+        q = (q or "").strip().lower()
+        if q in self.weapons:
+            return self.weapons[q]
+        for w in self.weapons.values():
+            if w["name"].lower() == q or w["slug"].replace("-", "") == q.replace("-", "").replace(" ", ""):
+                return w
+        return None
+
+    def search_weapons(self, q, limit=25):
+        q = (q or "").lower()
+        out = [w for w in self.weapons.values() if q in w["name"].lower() or q in w["slug"]]
+        return sorted(out, key=lambda w: w["name"])[:limit]
+
+    def calibre(self, w):
+        return self.calibres.get(w.get("calibre"), {})
+
+    def combat(self, cal, rnd):
+        return (cal.get("combat") or {}).get(rnd, DEFAULT_COMBAT)
+
+    def rounds_for(self, w):
+        cal = self.calibre(w)
+        loads = cal.get("loads") or ["FMJ"]
+        return [r for r in ("FMJ", "HollowPoint", "ArmorPiercing") if r in loads] or loads
+
+    def effective_round(self, w, rnd, cal_key=None):
+        """The round actually used: falls back to FMJ when the calibre has no such load (MetaForge does the same)."""
+        cal = self.calibres.get(cal_key) if cal_key else self.calibre(w)
+        loads = (cal or {}).get("loads") or ["FMJ"]
+        return rnd if rnd in loads else ("FMJ" if "FMJ" in loads else loads[0])
+
+    def ammo_options(self, w):
+        """Columns for /ammo: FMJ/HP/AP of the weapon's calibre, or each shell type for shotguns."""
+        shells = [k for k in (w.get("shells") or []) if self.calibres.get(k, {}).get("baseDamage")]
+        if len(shells) > 1:
+            out = []
+            for k in shells:
+                cal = self.calibres[k]
+                rnd = self.effective_round(w, "FMJ", k)
+                label = cal.get("label") or k
+                short = "SLUG" if "slug" in (k + label).lower() else "BUCK" if "buck" in (k + label).lower() else label
+                out.append({"cal": k, "rnd": rnd, "short": short, "name": label,
+                            "icon": (cal.get("roundIcons") or {}).get(rnd)})
+            return out
+        cal = self.calibre(w)
+        names = {"FMJ": "Standard", "HollowPoint": "Flesh Damage", "ArmorPiercing": "Armor Piercing"}
+        return [{"cal": w.get("calibre"), "rnd": r, "short": ROUND_SHORT.get(r, r), "name": names.get(r, r),
+                 "icon": (cal.get("roundIcons") or {}).get(r)} for r in self.rounds_for(w)]
+
+    def armour_for_zone(self, zone):
+        """Armor pieces that cover this zone, sorted by tier (L1..L4)."""
+        return [a for a in self.armour if zone in a["covers"]]
+
+    def zone_mult(self, w, zone):
+        hb = self.raw["hitboxes"].get(w.get("weaponClass") or w.get("subcategory"), {})
+        return hb.get(zone, 1.0)
+
+    # ---------- math ----------
+    @staticmethod
+    def falloff(w, rng):
+        pts = w.get("falloff") or []
+        if not pts:
+            return 1.0
+        if rng <= pts[0][0]:
+            return pts[0][1]
+        for (d0, m0, *_), (d1, m1, *_) in zip(pts, pts[1:]):
+            if d0 <= rng <= d1:
+                return m0 + (m1 - m0) * (rng - d0) / (d1 - d0) if d1 > d0 else m1
+        return pts[-1][1]
+
+    def hit(self, w, rnd, zone, armor=None, rng=50, cal_key=None):
+        cal = self.calibres.get(cal_key, {}) if cal_key else self.calibre(w)
+        base = cal.get("baseDamage")
+        if not base:
+            return None
+        rnd = self.effective_round(w, rnd, cal_key)
+        c = self.combat(cal, rnd)
+        pellets = cal.get("pellets") or 1  # buckshot: every pellet assumed to hit, like MetaForge
+        base = base * pellets
+        raw = base * self.zone_mult(w, zone) * self.falloff(w, rng)
+        bare = raw * c["bare"]
+        if armor:
+            dmg = raw * c["vsTier"].get(armor["tier"], 1) * (1 - armor["reduction"] / 100 * c["penScalar"])
+            # plate wears by base * plate multiplier per hit; once broken, hits do bare damage
+            wear = base * self.falloff(w, rng) * c["plateHelmet" if armor["slot"] == "helmet" else "plateArmor"]
+        else:
+            dmg, wear = bare, 0
+        hp, dur, shots, breaks = self.health, (armor or {}).get("durability", 0), 0, None
+        while hp > 1e-9 and shots < 500:
+            shots += 1
+            if armor and dur > 1e-9:
+                hp -= dmg
+                dur -= wear
+                if dur <= 1e-9:
+                    breaks = shots
+            else:
+                hp -= bare
+        rpm = w.get("roundsPerMinute") or 0
+        vel = w.get("muzzleVelocity") or 0
+        ttk = None
+        if rpm:
+            # 1.01 ~ drag slowing the bullet; reproduces MetaForge's TTK to the hundredth
+            ttk = round((shots - 1) * 60 / rpm + (rng / vel * 1.01 if vel else 0) + 1e-9, 2)
+        return {"dmg": dmg, "shots": shots, "ttk": ttk, "breaks": breaks}
+
+    def plate_vs_fmj(self, cal, rnd):
+        c, f = self.combat(cal, rnd), self.combat(cal, "FMJ")
+        return c["plateArmor"] / f["plateArmor"] - 1 if f.get("plateArmor") else 0
+
+
+# ---------- market helpers ----------
+RANGES = {"7d": 7, "30d": 30, "90d": 90, "all": None}
+
+
+def market_points(market, rng="30d"):
+    pts = market["points"]
+    days = RANGES.get(rng)
+    if days:
+        cutoff = pts[-1]["t"] - days * 86400000
+        pts = [p for p in pts if p["t"] >= cutoff]
+    return pts
+
+
+def money(n):
+    if n >= 1_000_000_000:
+        return f"${n / 1e9:.2f}B"
+    if n >= 1_000_000:
+        return f"${n / 1e6:.2f}M"
+    if n >= 10_000:
+        return f"${n / 1e3:.0f}K"
+    return f"${n:,.0f}"
