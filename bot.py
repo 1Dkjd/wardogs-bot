@@ -13,8 +13,10 @@ import views
 from wardogs import RANGES, MetaForge, market_points
 
 TOKEN = os.environ["DISCORD_TOKEN"]
-GUILD_ID = os.environ.get("GUILD_ID")  # set for instant command sync on your server
-DAILY_CHANNEL_ID = os.environ.get("DAILY_CHANNEL_ID")  # optional: auto-post new rate here
+# Optional: your home server. Old server-only command copies there get cleaned up so they don't show twice.
+GUILD_ID = os.environ.get("GUILD_ID")
+# Optional: channel for the automatic daily gold post (your server).
+DAILY_CHANNEL_ID = os.environ.get("DAILY_CHANNEL_ID")
 STATE_FILE = os.environ.get("STATE_FILE", "/data/state.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -22,7 +24,13 @@ log = logging.getLogger("wardogs-bot")
 
 mf = MetaForge()
 client = discord.Client(intents=discord.Intents.default())
-tree = app_commands.CommandTree(client)
+# Commands work in any server the bot is in, and for people who add it to their own account
+# (user install), including DMs and group chats.
+tree = app_commands.CommandTree(
+    client,
+    allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+    allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True),
+)
 
 ZONE_CHOICES = [app_commands.Choice(name=n, value=v) for n, v in views.ZONES]
 ROUND_CHOICES = [app_commands.Choice(name=n, value=v) for n, v in
@@ -120,46 +128,55 @@ async def on_tree_error(inter: discord.Interaction, err: app_commands.AppCommand
     await error(inter, "Couldn't reach MetaForge right now. Try again in a minute.")
 
 
-# ---------------- daily post ----------------
-def _load_state():
+# ---------------- state ----------------
+def _load(path):
     try:
-        with open(STATE_FILE) as f:
+        with open(path) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def _save_state(s):
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, "w") as f:
-        json.dump(s, f)
+def _save(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
 
 
+# ---------------- daily post ----------------
 @tasks.loop(minutes=30)
 async def daily_post():
     try:
         market = await mf.market()
-        latest = market["points"][-1]["t"]
-        state = _load_state()
-        if state.get("last_point") == latest:
-            return
-        channel = client.get_channel(int(DAILY_CHANNEL_ID)) or await client.fetch_channel(int(DAILY_CHANNEL_ID))
-        if state.get("last_point") is not None:  # skip the very first run so restarts don't spam
-            await channel.send(embed=embeds.gold_embed(market))
-        _save_state({"last_point": latest})
     except Exception:
-        log.exception("Daily post failed")
+        log.exception("Daily post: couldn't fetch market")
+        return
+    latest = market["points"][-1]["t"]
+    state = _load(STATE_FILE)
+    if state.get("last_point") == latest:
+        return
+    first_run = state.get("last_point") is None  # don't post on the very first start, so restarts don't spam
+    _save(STATE_FILE, {"last_point": latest})
+    if first_run:
+        return
+    try:
+        cid = int(DAILY_CHANNEL_ID)
+        channel = client.get_channel(cid) or await client.fetch_channel(cid)
+        await channel.send(embed=embeds.gold_embed(market))
+    except discord.HTTPException as e:
+        log.warning("Daily post to channel %s failed: %s", DAILY_CHANNEL_ID, e)
 
 
 @client.event
 async def on_ready():
+    synced = await tree.sync()  # global: every server + user installs (can take a few minutes the first time)
     if GUILD_ID:
         guild = discord.Object(id=int(GUILD_ID))
-        tree.copy_global_to(guild=guild)
-        synced = await tree.sync(guild=guild)
-    else:
-        synced = await tree.sync()
-    log.info("Logged in as %s, synced %d commands", client.user, len(synced))
+        tree.clear_commands(guild=guild)
+        await tree.sync(guild=guild)  # removes the old server-only copies so commands don't appear twice
+    log.info("Logged in as %s in %d servers, synced %d commands", client.user, len(client.guilds), len(synced))
     if DAILY_CHANNEL_ID and not daily_post.is_running():
         daily_post.start()
 
