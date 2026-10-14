@@ -10,9 +10,15 @@ Discord bot for [WARDOGS](https://store.steampowered.com/) built on MetaForge's 
 | `/compare m4 ak74 [weapon3]` | Side-by-side card, shots to kill vs every armor tier; zone, round and distance buttons |
 | `/ammo deagle` | FMJ vs HP vs AP (or slug vs buckshot) card; zone and distance buttons |
 | `/weapon m4` | Spray pattern, stock vs best build, and the best recoil attachment per slot |
-| `/vehicle l2a6` | What kills a vehicle on foot (mines, launchers, C4...) and how many hits, plus bullets and vehicle weapons |
+| `/vehicle l2a6` | What kills a vehicle on foot (mines, launchers, C4...) and how many hits; **Where to shoot** button shows every zone's armor, HP and ≈hits |
 | `/changes` | Latest balance patch the bot spotted |
 | `/help` | Command overview |
+| `/selftest` | (bot owner only) run every command against MetaForge now |
+
+**Owner alerts:** if a command or background job fails, the bot DMs its owner (the Discord app owner, or `OWNER_ID`)
+the error and where it happened, at most once per 30 min per error. A self-test renders every command against
+live MetaForge data 2 minutes after startup and then daily, and DMs the owner only when something breaks (and again
+when it recovers).
 
 **Balance-patch alerts:** every 3 hours the bot snapshots ~900 stats from MetaForge (weapon fire rate, recoil,
 ammo damage and penetration, armor, attachments, vehicle health, prices). When anything changes it posts a

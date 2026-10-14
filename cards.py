@@ -833,3 +833,99 @@ def patch_card(changes, detected=None, max_rows=22):
     d.text((pad, H - 24), "Green = better for whoever uses it  ·  red = worse", font=F["s"], fill=DIM, anchor="lm")
     d.text((W - pad, H - 24), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
     return _png(img)
+
+
+def vehicle_zones_card(v, zones, sources, icons=None):
+    """'Where to shoot': every zone's armor + HP + what breaking it does, and ≈hits for your best anti-vehicle gear."""
+    icons = icons or {}
+    info = v.get("vehicle") or {}
+    W, pad, row_h = 1000, 32, 52
+    usable = sorted([s for s in sources if s["kind"] != "vehicle" and s["hits"]], key=lambda s: (s["hits"], -s["damage"]))
+    gear = [s for s in usable if s["kind"] == "gear"]
+    launchers = [s for s in usable if s["kind"] == "weapon" and s["damage"] >= 100]
+    bullets = [s for s in usable if s["kind"] == "weapon" and s["damage"] < 100]
+    picks = [p for p in (gear[:1] + launchers[:1] + bullets[:1])]
+    for s in usable:  # top up to 3 columns if a category is empty (e.g. bullets do nothing to tanks)
+        if len(picks) >= 3:
+            break
+        if s not in picks:
+            picks.append(s)
+    picks = picks[:3]
+    # MetaForge's listed damage is before the vehicle's own damage rules, so derive the real per-hit damage
+    # from its authoritative hit count on the zone it names (usually the main hull).
+    zone_hp = {z["name"].lower(): z["hp"] for z in zones}
+    for p in picks:
+        target_hp = zone_hp.get((p.get("zone") or "").lower(), info.get("health") or 0)
+        p["eff"] = target_hp / p["hits"] if p["hits"] and target_hp else p["damage"]
+    H = 230 + 96 + max(1, len(zones)) * row_h + 130
+
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+    _rr(d, (pad, 32, pad + 260, 172), fill=PANEL, r=14)
+    if icons.get(v.get("icon")):
+        _paste_center(img, _fit(icons[v["icon"]], 236, 124), pad + 130, 102)
+    d.text((pad + 290, 62), v["name"].upper(), font=F["title"], fill=TEXT, anchor="lm")
+    d.text((pad + 292, 106), v.get("subtitle") or v.get("subcategory") or "", font=F["b"], fill=MUTED, anchor="lm")
+    x = pad + 290
+    for t in (f"{info.get('health', '?')} HP", f"{len(zones)} ZONES"):
+        x = _chip(d, x, 136, t)
+    tw = d.textlength("WHERE TO SHOOT", font=F["s"])
+    _chip(d, W - pad - tw - 20, 44, "WHERE TO SHOOT", fill=(52, 44, 22), color=GOLD)
+
+    # tips
+    kill = min((z for z in zones if z["verb"] == "destroy"), key=lambda z: z["hp"], default=None)
+    disable = min((z for z in zones if z["verb"] == "break" and any(k in z["name"].lower() for k in
+                   ("wheel", "track", "rotor", "engine"))), key=lambda z: z["hp"], default=None)
+    tips = []
+    def plain(n):
+        n = n.lower()
+        for side in ("front left ", "front right ", "rear left ", "rear right ", "left ", "right ", "main ", "tail "):
+            n = n.replace(side, "")
+        return n + ("s" if n in ("wheel", "track", "rotor") else "")
+    if disable:
+        tips.append(f"Disable it: {plain(disable['name'])} ({disable['hp']} HP)")
+    if kill:
+        tips.append(f"Kill it: {kill['name'].lower()} ({kill['hp']} HP)")
+    d.text((pad + 290, 194), "   ·   ".join(tips), font=F["b"], fill=GOLD, anchor="lm")
+
+    # column layout
+    y = 230
+    cols = {"zone": pad + 16, "armor": pad + 250, "hp": pad + 400, "effect": pad + 470}
+    pick_x0, pick_w = pad + 610, (W - pad - (pad + 610)) / max(1, len(picks))
+    _rr(d, (pad, y, W - pad, y + 84), fill=PANEL, r=14)
+    for lab, k in (("ZONE", "zone"), ("ARMOR", "armor"), ("HP", "hp"), ("WHAT IT DOES", "effect")):
+        d.text((cols[k], y + 42), lab, font=F["s"], fill=MUTED, anchor="lm")
+    for i, s in enumerate(picks):
+        cx = pick_x0 + i * pick_w + pick_w / 2
+        ic = icons.get(s.get("icon"))
+        if ic:
+            _paste_center(img, _fit(ic, pick_w - 24, 30), cx, y + 24)
+        name = s["users"][0].replace("Improvised Explosive Device", "IED")
+        if s["kind"] == "weapon" and s["damage"] < 100:
+            name = s["name"]  # bullets: show the round (".50 cal"), many guns share it
+        d.text((cx, y + 52), name, font=F["s"], fill=TEXT, anchor="mm")
+        d.text((cx, y + 70), f"{s['hits']} to {'kill' if s['verb'] == 'destroy' else 'break'}", font=F["s"], fill=DIM, anchor="mm")
+    y += 96
+
+    for i, z in enumerate(zones):
+        if i % 2 == 0:
+            _rr(d, (pad, y, W - pad, y + row_h - 4), fill=(23, 25, 29), r=10)
+        mid = y + (row_h - 4) / 2
+        d.text((cols["zone"], mid), z["name"], font=F["b"], fill=TEXT, anchor="lm")
+        d.text((cols["armor"], mid), z["thickness"] or "—", font=F["m"], fill=DIM, anchor="lm")
+        d.text((cols["hp"], mid), f"{z['hp']:,}", font=F["b"], fill=TEXT, anchor="lm")
+        eff, col = ("Destroys it", BAD) if z["verb"] == "destroy" else ("Breaks part", GOLD)
+        d.text((cols["effect"], mid), eff, font=F["s"], fill=col, anchor="lm")
+        for k, s in enumerate(picks):
+            cx = pick_x0 + k * pick_w + pick_w / 2
+            n = max(1, math.ceil(z["hp"] / s["eff"] - 1e-9))
+            d.text((cx, mid), f"≈{n}", font=F["h"], fill=_hits_color(n), anchor="mm")
+        y += row_h
+
+    d.text((pad, y + 24), "≈ hits per zone are estimated from MetaForge's exact hits-to-kill, so they can be off by one.",
+           font=F["s"], fill=DIM, anchor="lm")
+    d.line((pad, H - 44, W - pad, H - 44), fill=LINE, width=1)
+    d.text((pad, H - 24), "Armor = plate thickness  ·  breaking wheels, tracks or rotors cripples it without the kill", font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 24), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)

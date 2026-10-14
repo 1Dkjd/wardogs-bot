@@ -11,6 +11,7 @@ from discord.ext import tasks
 
 import cards
 import patches
+import selftest
 import views
 from wardogs import RANGES, MetaForge
 
@@ -30,6 +31,7 @@ mf = MetaForge()
 client = discord.Client(intents=discord.Intents.default())
 # Commands work in any server the bot is in, and for people who add it to their own account
 # (user install), including DMs and group chats.
+alerts = selftest.OwnerAlerts(client)  # DMs the bot owner when something breaks
 tree = app_commands.CommandTree(
     client,
     allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
@@ -149,7 +151,8 @@ async def vehicle(inter: discord.Interaction, vehicle: str):
     slug = vehicle if vehicle in vs else next((k for k, v in vs.items() if v["name"].lower() == vehicle.lower()), None)
     if not slug:
         return await error(inter, f"Couldn't find a vehicle called **{vehicle}**.")
-    await inter.followup.send(file=await views.render_vehicle(mf, slug), view=views.vehicle_link_view(slug))
+    view = views.VehicleView(mf, slug)
+    view.message = await inter.followup.send(file=await views.render_vehicle(mf, slug), view=view, wait=True)
 
 
 @tree.command(name="help", description="What this bot can do")
@@ -161,6 +164,11 @@ async def help_cmd(inter: discord.Interaction):
 @tree.error
 async def on_tree_error(inter: discord.Interaction, err: app_commands.AppCommandError):
     log.exception("Command failed", exc_info=err)
+    original = getattr(err, "original", err)
+    cmd = f"/{inter.command.qualified_name}" if inter.command else "command"
+    params = ", ".join(f"{k}={v}" for k, v in vars(inter.namespace).items())
+    where = inter.guild.name if inter.guild else "DM / user install"
+    asyncio.create_task(alerts.error(cmd, original, f"{params} · {where}" if params else where))
     await error(inter, "Couldn't reach MetaForge right now. Try again in a minute.")
 
 
@@ -186,8 +194,9 @@ def _save(path, data):
 async def daily_post():
     try:
         market = await mf.market()
-    except Exception:
+    except Exception as e:
         log.exception("Daily post: couldn't fetch market")
+        await alerts.error("Daily gold post", e)
         return
     latest = market["points"][-1]["t"]
     state = _load(STATE_FILE)
@@ -203,6 +212,7 @@ async def daily_post():
         await channel.send(file=await views.render_gold(mf), view=views.market_link_view())
     except discord.HTTPException as e:
         log.warning("Daily post to channel %s failed: %s", DAILY_CHANNEL_ID, e)
+        await alerts.error("Daily gold post", e, f"channel {DAILY_CHANNEL_ID}")
 
 
 # ---------------- balance patch alerts ----------------
@@ -218,8 +228,9 @@ async def _channel(cid):
 async def patch_watch():
     try:
         b, db, st = await mf.patch_sources()
-    except Exception:
+    except Exception as e:
         log.exception("Patch check: couldn't fetch MetaForge data")
+        await alerts.error("Balance-patch check", e)
         return
     changes = watcher.check(patches.snapshot(b, db, st))
     if not changes:
@@ -231,6 +242,7 @@ async def patch_watch():
             await (await _channel(PATCH_CHANNEL_ID)).send(file=discord.File(png, "wardogs-patch.png"))
         except discord.HTTPException as e:
             log.warning("Patch alert post failed: %s", e)
+            await alerts.error("Balance-patch alert post", e, f"channel {PATCH_CHANNEL_ID}")
 
 
 @tree.command(description="The latest balance changes the bot spotted")
@@ -242,6 +254,48 @@ async def changes(inter: discord.Interaction):
                                          "and posts here when weapon, ammo, armor or price stats change.")
     png = await asyncio.to_thread(cards.patch_card, last["changes"], last["detected"])
     await inter.followup.send(file=discord.File(png, "wardogs-patch.png"))
+
+
+# ---------------- self-test ----------------
+_selftest_state = {"failed": False}
+
+
+async def _run_selftest(notify=True):
+    results = await selftest.run(mf)
+    failed = any(not ok for _, ok, _, _ in results)
+    log.info(selftest.summary(results).splitlines()[0])
+    if notify and failed:
+        await alerts.send(selftest.summary(results))
+    elif notify and _selftest_state["failed"] and not failed:
+        await alerts.send("✅ **WARDOGS bot self-test passing again.** Everything works.")
+    _selftest_state["failed"] = failed
+    return results
+
+
+@tasks.loop(hours=24)
+async def daily_selftest():
+    try:
+        await _run_selftest()
+    except Exception as e:
+        log.exception("Self-test crashed")
+        await alerts.error("Self-test", e)
+
+
+@daily_selftest.before_loop
+async def _before_selftest():
+    await client.wait_until_ready()
+    await asyncio.sleep(120)  # let startup settle first
+
+
+@tree.command(name="selftest", description="(Bot owner) Test every command against MetaForge right now")
+@app_commands.default_permissions(administrator=True)
+async def selftest_cmd(inter: discord.Interaction):
+    owner = await alerts.owner()
+    if inter.user.id != owner.id:
+        return await inter.response.send_message("Only the bot's owner can run this.", ephemeral=True)
+    await inter.response.defer(ephemeral=True)
+    results = await _run_selftest(notify=False)
+    await inter.followup.send(selftest.summary(results)[:1990], ephemeral=True)
 
 
 @client.event
@@ -256,6 +310,8 @@ async def on_ready():
         daily_post.start()
     if not patch_watch.is_running():
         patch_watch.start()
+    if not daily_selftest.is_running():
+        daily_selftest.start()
 
 
 client.run(TOKEN, log_handler=None)

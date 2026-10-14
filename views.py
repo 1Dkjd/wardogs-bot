@@ -215,7 +215,7 @@ async def render_help(mf):
 
 
 # ---------------- vehicles ----------------
-async def render_vehicle(mf, slug):
+async def render_vehicle(mf, slug, mode="kill"):
     from wardogs import classify_sources
 
     vehicles = await mf.vehicles()
@@ -223,16 +223,48 @@ async def render_vehicle(mf, slug):
     b = await mf.ballistics()
     db = await mf._get("database", mf.ttl_static)
     items = {i["slug"]: i for i in db.get("items", []) if not i.get("wip")}
-    sources = classify_sources(await mf.destroy_list(slug), b, items)
+    page = await mf.vehicle_page(slug)
+    sources = classify_sources(page["rounds"], b, items)
     names = {v.get("icon")} | {s.get("icon") for s in sources if s.get("icon") and s["kind"] != "vehicle"}
     names.discard(None)
     datas = await asyncio.gather(*(mf.icon(n) for n in names))
     icons = {n: _img(d) for n, d in zip(names, datas)}
-    png = await asyncio.to_thread(cards.vehicle_card, v, sources, icons)
-    return discord.File(png, "wardogs-vehicle.png")
+    if mode == "zones":
+        png = await asyncio.to_thread(cards.vehicle_zones_card, v, page["zones"], sources, icons)
+    else:
+        png = await asyncio.to_thread(cards.vehicle_card, v, sources, icons)
+    return discord.File(png, f"wardogs-vehicle-{mode}.png")
 
 
-def vehicle_link_view(slug):
-    v = discord.ui.View(timeout=None)
-    v.add_item(discord.ui.Button(label="View on MetaForge", url=f"{SITE}/database/vehicles/{slug}"))
-    return v
+class VehicleModeButton(discord.ui.Button):
+    def __init__(self, label, mode, current):
+        super().__init__(label=label, row=0,
+                         style=discord.ButtonStyle.primary if mode == current else discord.ButtonStyle.secondary)
+        self.mode = mode
+
+    async def callback(self, inter: discord.Interaction):
+        view = self.view  # build() replaces the buttons, which clears self.view
+        view.mode = self.mode
+        await inter.response.defer()
+        try:
+            file = await render_vehicle(view.mf, view.slug, self.mode)
+        except Exception:
+            log.exception("Vehicle re-render failed")
+            return await inter.followup.send("⚠️ Couldn't redraw that right now.", ephemeral=True)
+        view.build()
+        await inter.edit_original_response(attachments=[file], view=view)
+
+
+class VehicleView(discord.ui.View):
+    def __init__(self, mf, slug, mode="kill"):
+        super().__init__(timeout=900)
+        self.mf, self.slug, self.mode, self.message = mf, slug, mode, None
+        self.build()
+
+    def build(self):
+        self.clear_items()
+        self.add_item(VehicleModeButton("What kills it", "kill", self.mode))
+        self.add_item(VehicleModeButton("Where to shoot", "zones", self.mode))
+        self.add_item(discord.ui.Button(label="View on MetaForge", url=f"{SITE}/database/vehicles/{self.slug}", row=0))
+
+    on_timeout = CardView.on_timeout

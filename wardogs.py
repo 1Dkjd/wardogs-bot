@@ -68,8 +68,8 @@ class MetaForge:
                 out[i["slug"]] = {**i, "protection": (extra.get(i["slug"]) or {}).get("protection", [])}
         return out
 
-    async def destroy_list(self, slug):
-        """MetaForge's 'what destroys it' ranking for a vehicle (server-rendered on its page), cached."""
+    async def vehicle_page(self, slug):
+        """Both lists MetaForge renders on a vehicle page ('what destroys it' + 'where to shoot'), cached."""
         key = f"page:vehicle:{slug}"
         hit = self._cache.get(key)
         if hit and time.time() - hit[0] < self.ttl_static:
@@ -79,9 +79,13 @@ class MetaForge:
                                          max_line_size=65536, max_field_size=65536) as s:
             async with s.get(f"{SITE}/database/vehicles/{slug}") as r:
                 r.raise_for_status()
-                rows = parse_destroy_list(await r.text())
-        self._cache[key] = (time.time(), rows)
-        return rows
+                html = await r.text()
+        page = {"rounds": parse_destroy_list(html), "zones": parse_zones(html)}
+        self._cache[key] = (time.time(), page)
+        return page
+
+    async def destroy_list(self, slug):
+        return (await self.vehicle_page(slug))["rounds"]
 
     async def attachments(self):
         db = await self._get("database", self.ttl_static)
@@ -398,4 +402,37 @@ def classify_sources(rows, b, items_by_slug):
         else:
             r.update(kind="vehicle", users=[], icon=None)
         out.append(r)
+    return out
+
+
+_ZONE_NAME = re.compile(r'aria-label="([^"]+)"')
+_THICK = re.compile(r'text-\[11px\][^>]*>([^<]*)<')
+
+
+def parse_zones(html):
+    """Read MetaForge's 'Where to shoot' zone list from a vehicle page.
+    Returns [{name, thickness, hp, damage, hits, verb}] (verb: 'destroy' = kills the vehicle, 'break' = breaks a part)."""
+    m = re.search(r'<div[^>]*role="tabpanel"[^>]*data-value="zones"[^>]*>', html)
+    if not m:
+        return []
+    j = html.find("</ul>", m.start())
+    out, seen = [], set()
+    for li in _LI.findall(html[m.start():j]):
+        name = _ZONE_NAME.search(li)
+        text = " ".join(_TAG.sub(" ", li).replace("&amp;", "&").split())
+        hp = re.search(r"([\d,]+)\s+hp", text)
+        dmg = re.search(r"([\d.,]+)\s+damage", text)
+        hits = re.search(r"(\d+)\s+to\s+(destroy it|break)", text)
+        if not (name and hp):
+            continue
+        key = name.group(1)
+        if key in seen:
+            continue
+        seen.add(key)
+        th = _THICK.search(li)
+        out.append({"name": key, "thickness": th.group(1).strip() if th else "",
+                    "hp": int(hp.group(1).replace(",", "")),
+                    "damage": float(dmg.group(1).replace(",", "")) if dmg else None,
+                    "hits": int(hits.group(1)) if hits else None,
+                    "verb": ("destroy" if hits.group(2).startswith("destroy") else "break") if hits else None})
     return out
