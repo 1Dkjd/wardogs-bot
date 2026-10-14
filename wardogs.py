@@ -74,7 +74,9 @@ class MetaForge:
         hit = self._cache.get(key)
         if hit and time.time() - hit[0] < self.ttl_static:
             return hit[1]
-        async with aiohttp.ClientSession(headers=UA, timeout=aiohttp.ClientTimeout(total=30)) as s:
+        # MetaForge pages send a ~10 KB "Link: preload" header; aiohttp's default limit is 8 KB
+        async with aiohttp.ClientSession(headers=UA, timeout=aiohttp.ClientTimeout(total=30),
+                                         max_line_size=65536, max_field_size=65536) as s:
             async with s.get(f"{SITE}/database/vehicles/{slug}") as r:
                 r.raise_for_status()
                 rows = parse_destroy_list(await r.text())
