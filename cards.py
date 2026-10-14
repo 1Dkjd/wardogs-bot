@@ -1,5 +1,6 @@
 """Pillow-rendered image cards for /ammo and /compare."""
 import io
+import math
 import os
 
 from PIL import Image, ImageDraw, ImageFont
@@ -620,4 +621,169 @@ def help_card(gold_icon=None):
     d.line((pad, H - 40, W - pad, H - 40), fill=LINE, width=1)
     d.text((pad, H - 20), "Numbers match metaforge.app/wardogs/ballistics", font=F["s"], fill=DIM, anchor="lm")
     d.text((W - pad, H - 20), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
+    return _png(img)
+
+
+# ---------------- loadout card ----------------
+START_CASH = 10_000  # every life starts with $10,000 to spend
+
+
+def _usd(n):
+    return f"${n:,.0f}"
+
+
+def _item_tile(img, d, box, label, name, price, icon=None, sub=None, qty=None, icon_w=None):
+    _rr(d, box, fill=PANEL, r=14)
+    L, T, R, B = box
+    d.text((L + 16, T + 20), label, font=F["s"], fill=MUTED, anchor="lm")
+    if price is not None:
+        d.text((R - 16, T + 20), _usd(price), font=F["s"], fill=GOLD, anchor="rm")
+    iw = icon_w or min(110, (B - T) - 44)
+    if icon:
+        _paste_center(img, _fit(icon, iw, (B - T) - 48), L + 16 + iw / 2, (T + 38 + B) / 2 + 2)
+    tx = L + 28 + iw
+    d.text((tx, (T + B) / 2 + (2 if not sub else -6)), name + (f"  ×{qty}" if qty and qty > 1 else ""),
+           font=F["b"], fill=TEXT, anchor="lm")
+    if sub:
+        d.text((tx, (T + B) / 2 + 18), sub, font=F["s"], fill=DIM, anchor="lm")
+
+
+def loadout_card(b, A, kit, icons=None):
+    """kit: resolved loadout (see loadout.resolve). icons: {icon_name: PIL image}."""
+    icons = icons or {}
+    ic = lambda it: icons.get((it or {}).get("icon"))
+    W, pad = 1000, 32
+    H = 830
+    img = Image.new("RGBA", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, W, 5), fill=GOLD)
+
+    total, weight = kit["total"], kit["weight"]
+
+    # ---- header ----
+    d.text((pad, 58), kit["name"].upper(), font=F["title"], fill=TEXT, anchor="lm")
+    meta = "  ·  ".join(filter(None, [f"by {kit['author']}" if kit.get("author") else None] + kit.get("tags", [])))
+    d.text((pad + 2, 104), meta, font=F["m"], fill=MUTED, anchor="lm")
+    x = pad
+    x = _chip(d, x, 124, f"{weight:.1f} KG")
+    _chip(d, x, 124, f"{kit['count']} ITEMS")
+
+    # cost block (right)
+    RX = W - pad
+    d.text((RX, 36), "COST PER LIFE", font=F["s"], fill=MUTED, anchor="rm")
+    d.text((RX, 76), _usd(total), font=F["title"], fill=GOLD if total <= START_CASH else BAD, anchor="rm")
+    bar_l, bar_r, bar_y = RX - 300, RX, 118
+    _rr(d, (bar_l, bar_y, bar_r, bar_y + 10), fill=CELL, r=5)
+    frac = min(1, total / START_CASH)
+    _rr(d, (bar_l, bar_y, bar_l + max(10, (bar_r - bar_l) * frac), bar_y + 10), fill=GOLD if total <= START_CASH else BAD, r=5)
+    note = (f"{total / START_CASH:.0%} of the $10,000 you spawn with" if total <= START_CASH
+            else f"{_usd(total - START_CASH)} over the $10,000 you spawn with")
+    d.text((RX, 142), note, font=F["s"], fill=DIM, anchor="rm")
+
+    # ---- primary ----
+    p = kit["primary"]
+    PL, PT, PR, PB = pad, 172, 656, 452
+    _rr(d, (PL, PT, PR, PB), fill=PANEL, r=14)
+    d.text((PL + 18, PT + 22), "PRIMARY", font=F["s"], fill=MUTED, anchor="lm")
+    d.text((PR - 18, PT + 22), _usd(p["item"]["price"]), font=F["s"], fill=GOLD, anchor="rm")
+    if ic(p["item"]):
+        _paste_center(img, _fit(ic(p["item"]), 330, 120), PL + 18 + 165, PT + 104)
+    d.text((PL + 370, PT + 72), p["item"]["name"].upper(), font=F["big"], fill=TEXT, anchor="lm")
+    d.text((PL + 372, PT + 106), p["item"].get("subcategory") or "", font=F["m"], fill=MUTED, anchor="lm")
+    if p.get("ammo"):
+        am = p["ammo"]
+        if ic(am["item"]):
+            _paste_center(img, _fit(ic(am["item"]), 44, 44), PL + 394, PT + 146)
+        d.text((PL + 424, PT + 140), f"{am['label']} × {am['rounds']}", font=F["b"], fill=TEXT, anchor="lm")
+        d.text((PL + 424, PT + 160), _usd(am["price"]), font=F["s"], fill=GOLD, anchor="lm")
+    # attachments row
+    atts = p.get("attachments") or []
+    if atts:
+        n = len(atts)
+        tw = (PR - PL - 36 - (n - 1) * 10) / n
+        for i, a in enumerate(atts):
+            bx = PL + 18 + i * (tw + 10)
+            box = (bx, PT + 186, bx + tw, PB - 16)
+            _rr(d, box, fill=CELL, r=12)
+            if ic(a):
+                _paste_center(img, _fit(ic(a), tw - 60, 40), (box[0] + box[2]) / 2, box[1] + 30)
+            name = a["name"]
+            while d.textlength(name, font=F["s"]) > tw - 16 and len(name) > 4:
+                name = name[:-2]
+            if name != a["name"]:
+                name = name.rstrip() + "…"
+            d.text(((box[0] + box[2]) / 2, box[1] + 60), name, font=F["s"], fill=TEXT, anchor="mm")
+            d.text(((box[0] + box[2]) / 2, box[1] + 78), f"{A.label(a['slot'])} · {_usd(a.get('price') or 0)}",
+                   font=F["s"], fill=DIM, anchor="mm")
+
+    # ---- armor / helmet ----
+    for (it, label), (T2, B2) in zip(((kit.get("armor"), "ARMOR"), (kit.get("helmet"), "HELMET")), ((172, 306), (318, 452))):
+        if it:
+            spec = next((a for a in b.armour if a["slug"] == it["slug"]), None)
+            sub = f"blocks {spec['reduction']}% · {spec['durability']} dur" if spec else it.get("subcategory")
+            _item_tile(img, d, (672, T2, W - pad, B2), label, it["name"], it["price"], ic(it), sub, icon_w=90)
+        else:
+            _rr(d, (672, T2, W - pad, B2), fill=PANEL, r=14)
+            d.text((688, T2 + 20), label, font=F["s"], fill=MUTED, anchor="lm")
+            d.text(((672 + W - pad) / 2, (T2 + B2) / 2 + 8), "None", font=F["b"], fill=DIM, anchor="mm")
+
+    # ---- sidearm + gear ----
+    s = kit.get("sidearm")
+    if s:
+        sub = f"{s['ammo']['label']} × {s['ammo']['rounds']} · {_usd(s['ammo']['price'])}" if s.get("ammo") else None
+        _item_tile(img, d, (pad, 468, 396, 588), "SIDEARM", s["item"]["name"], s["item"]["price"], ic(s["item"]), sub, icon_w=110)
+    gear = kit.get("gear") or []
+    GL, GR = 412, W - pad
+    _rr(d, (GL, 468, GR, 588), fill=PANEL, r=14)
+    d.text((GL + 16, 488), "GEAR", font=F["s"], fill=MUTED, anchor="lm")
+    if gear:
+        gw = (GR - GL - 32 - (len(gear) - 1) * 10) / max(1, len(gear))
+        for i, g in enumerate(gear[:5]):
+            bx = GL + 16 + i * (gw + 10)
+            box = (bx, 502, bx + gw, 576)
+            _rr(d, box, fill=CELL, r=10)
+            if ic(g["item"]):
+                _paste_center(img, _fit(ic(g["item"]), 46, 46), box[0] + 32, (box[1] + box[3]) / 2)
+            name = g["item"]["name"].replace("M67 ", "").replace("Basic ", "")
+            d.text((box[0] + 62, box[1] + 26), f"{name}", font=F["s"], fill=TEXT, anchor="lm")
+            d.text((box[0] + 62, box[1] + 48), f"×{g['qty']}  ·  {_usd(g['item']['price'] * g['qty'])}", font=F["s"], fill=GOLD, anchor="lm")
+    else:
+        d.text(((GL + GR) / 2, 534), "No gear", font=F["b"], fill=DIM, anchor="mm")
+
+    # ---- in a fight ----
+    FT = 604
+    _rr(d, (pad, FT, W - pad, FT + 162), fill=PANEL, r=14)
+    w = b.weapons.get(p["item"]["slug"])
+    rnd = (p.get("ammo") or {}).get("round", "FMJ")
+    d.text((pad + 18, FT + 22), f"IN A FIGHT  ·  {p['item']['name'].upper()} + {ROUND_SHORT.get(rnd, rnd)}  ·  50 M  ·  SHOTS TO KILL",
+           font=F["s"], fill=MUTED, anchor="lm")
+    if w:
+        for ri, (zone, lab) in enumerate((("torso_upper", "Body"), ("head", "Head"))):
+            y = FT + 54 + ri * 40
+            d.text((pad + 18, y), lab, font=F["b"], fill=TEXT, anchor="lm")
+            cx = pad + 90
+            tiers = [(None, "No armor")] + [(a, f"L{a['name'].split()[1]}") for a in b.armour_for_zone(zone)]
+            for a, t in tiers:
+                h = b.hit(w, rnd, zone, a, 50)
+                if not h:
+                    continue
+                col = stk_color(h["shots"])
+                txt = f"{t}  {h['shots']}{'*' if h['breaks'] else ''}"
+                cx = _chip(d, cx, y - 14, txt, fill=CELL, color=col)
+        # recoil with the chosen attachments
+        from wardogs import spray_path
+        v = math.prod(a.get("v", 1) for a in atts) if atts else 1
+        hm = math.prod(a.get("h", 1) for a in atts) if atts else 1
+        stock, built = spray_path(w), spray_path(w, v, hm)
+        if len(stock) > 2:
+            msg = f"Recoil: climb {stock[-1][1]:.1f}° → {built[-1][1]:.1f}° with these attachments ({(v - 1) * 100:+.0f}% vertical)"
+        else:
+            msg = "Single-shot weapon: no spray pattern"
+        d.text((pad + 18, FT + 138), msg, font=F["m"], fill=GOLD if v < 0.999 else MUTED, anchor="lm")
+    else:
+        d.text((pad + 18, FT + 70), "No ballistics data for this weapon", font=F["b"], fill=DIM, anchor="lm")
+
+    d.line((pad, H - 44, W - pad, H - 44), fill=LINE, width=1)
+    d.text((pad, H - 24), "Prices are vendor cost per life  ·  ammo priced per 10 rounds", font=F["s"], fill=DIM, anchor="lm")
+    d.text((W - pad, H - 24), "data: metaforge.app", font=F["s"], fill=DIM, anchor="rm")
     return _png(img)

@@ -252,6 +252,7 @@ class Attachments:
             m = {x["attribute"]: x["value"] for x in mods.get(a["slug"], {}).get("modifiers", [])
                  if x.get("op") == "multiply" and x.get("scope") == "weapon"}
             entry = {"slug": a["slug"], "name": a["name"], "slot": a["slot"], "icon": a.get("icon"),
+                     "price": a.get("price"), "weight": a.get("weight") or 0,
                      "capacity": a.get("capacity"), "v": m.get("VerticalRecoilMultiplier", 1.0),
                      "h": m.get("HorizontalRecoilMultiplier", 1.0), "spread": m.get("SpreadMultiplier", 1.0),
                      "ads": m.get("AimTime", 1.0)}
