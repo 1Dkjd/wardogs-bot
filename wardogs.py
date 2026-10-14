@@ -52,7 +52,10 @@ class MetaForge:
 
     async def icon_names(self):
         """slug -> icon name, from the item database (ballistics data has no icons)."""
-        db = await self._get("database", self.ttl_static)
+        try:
+            db = await self._get("database", self.ttl_static)
+        except Exception:
+            return {}  # icons are cosmetic; cards still render without them
         return {i["slug"]: i["icon"] for i in db.get("items", []) if i.get("icon")}
 
     async def icon(self, name):

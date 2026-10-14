@@ -132,15 +132,16 @@ class RangeButton(discord.ui.Button):
         self.rng = rng
 
     async def callback(self, inter: discord.Interaction):
-        self.view.rng = self.rng
+        view = self.view  # build() replaces the buttons (incl. this one), which clears self.view
+        view.rng = self.rng
         await inter.response.defer()
         try:
-            file = await render_chart(self.view.mf, self.rng)
+            file = await render_chart(view.mf, self.rng)
         except Exception:
             log.exception("Chart re-render failed")
             return await inter.followup.send("⚠️ Couldn't redraw the chart right now.", ephemeral=True)
-        self.view.build()
-        await inter.edit_original_response(attachments=[file], view=self.view)
+        view.build()
+        await inter.edit_original_response(attachments=[file], view=view)
 
 
 class ChartView(discord.ui.View):
