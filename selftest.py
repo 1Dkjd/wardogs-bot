@@ -11,7 +11,7 @@ import views
 
 log = logging.getLogger("wardogs-bot.selftest")
 
-ENDPOINTS = ["market", "ballistics", "database", "attachment-stats", "skins", "vehicles"]
+ENDPOINTS = ["market", "ballistics/v2", "database", "attachment-stats", "skins", "vehicles"]
 
 
 async def run(mf):

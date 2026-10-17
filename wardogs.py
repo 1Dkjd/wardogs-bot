@@ -48,12 +48,22 @@ class MetaForge:
     async def market(self):
         return await self._get("market", self.ttl_market)
 
+    async def _ballistics_raw(self, ttl):
+        """Season 2+ feed (ballistics/v2, which MetaForge's own pages use), falling back to the old one."""
+        try:
+            data = await self._get("ballistics/v2", ttl)
+            if data.get("weapons"):
+                return data
+        except Exception:
+            pass
+        return await self._get("ballistics", ttl)
+
     async def ballistics(self):
-        return Ballistics(await self._get("ballistics", self.ttl_static))
+        return Ballistics(await self._ballistics_raw(self.ttl_static))
 
     async def patch_sources(self):
         """Fresh (uncached) copies of everything the patch watcher snapshots. Also refreshes the command cache."""
-        return (await self._get("ballistics", 0), await self._get("database", 0),
+        return (await self._ballistics_raw(0), await self._get("database", 0),
                 await self._get("attachment-stats", 0))
 
     async def skins(self):
@@ -124,14 +134,52 @@ class MetaForge:
             return None
 
 
+def _rule_applies(rule, rnd=None, tier=None, zone=None):
+    if rule.get("rounds") and rnd not in rule["rounds"]:
+        return False
+    if rule.get("targets") and tier not in rule["targets"]:
+        return False
+    if rule.get("zones") and zone not in rule["zones"]:
+        return False
+    return True
+
+
+def rules_mult(rules, rnd=None, tier=None, zone=None):
+    """Season 2 damage rules: multiply (1 + pct/100) for every rule that applies to this round/armor tier/zone."""
+    return math.prod(1 + r["pct"] / 100 for r in rules or [] if _rule_applies(r, rnd, tier, zone))
+
+
+def normalize_ballistics(raw):
+    """Season 2 (format 2) stores ammo effects as rule lists. Rebuild the per-round table the rest of the bot
+    (and the Season 1 feed) uses: bare, penScalar, vsTier, plateArmor, plateHelmet. In place; returns raw."""
+    tiers = [a["tier"] for a in raw.get("armour", [])]
+    for c in (raw.get("calibres") or {}).values():
+        if "combat" in c or "rules" not in c:
+            continue
+        rules = [r for r in c["rules"] if not r.get("zones")]  # zone-only rules are applied per hit
+        plate = c.get("plate") or []
+        combat = {}
+        for rnd in c.get("loads") or ["FMJ"]:
+            combat[rnd] = {
+                "bare": rules_mult([r for r in rules if not r.get("targets")], rnd),
+                "penScalar": (c.get("pen") or {}).get(rnd, 1),
+                "vsTier": {t: rules_mult(rules, rnd, t) for t in tiers},
+                "plateArmor": rules_mult([p for p in plate if p.get("slot") == "armor"], rnd),
+                "plateHelmet": rules_mult([p for p in plate if p.get("slot") == "helmet"], rnd),
+            }
+        c["combat"] = combat
+    return raw
+
+
 class Ballistics:
     def __init__(self, raw):
-        self.raw = raw
+        self.raw = normalize_ballistics(raw)
         self.health = raw.get("assumedHealth", 100)
         self.weapons = {w["slug"]: w for w in raw["weapons"] if w["slug"] not in HIDDEN_WEAPONS}
         self.calibres = raw["calibres"]
         self.zones = {h["key"]: h["label"] for h in raw["hitLocations"]}
         self.armour = raw["armour"]
+        self._flight = {}
 
     # ---------- lookups ----------
     def find_weapon(self, q):
@@ -184,8 +232,8 @@ class Ballistics:
                  "icon": (cal.get("roundIcons") or {}).get(r)} for r in self.rounds_for(w)]
 
     def armour_for_zone(self, zone):
-        """Armor pieces that cover this zone, sorted by tier (L1..L4)."""
-        return [a for a in self.armour if zone in a["covers"]]
+        """Level 1-4 armor/helmets that cover this zone (role gear like pilot/tank helmets left out)."""
+        return [a for a in self.armour if zone in a["covers"] and a.get("slug", "").startswith("level-")]
 
     def zone_mult(self, w, zone):
         hb = self.raw["hitboxes"].get(w.get("weaponClass") or w.get("subcategory"), {})
@@ -194,50 +242,146 @@ class Ballistics:
     # ---------- math ----------
     @staticmethod
     def falloff(w, rng):
+        """Damage multiplier by distance: linear between points, cubic Hermite where a point is flagged."""
         pts = w.get("falloff") or []
         if not pts:
             return 1.0
         if rng <= pts[0][0]:
             return pts[0][1]
-        for (d0, m0, *_), (d1, m1, *_) in zip(pts, pts[1:]):
-            if d0 <= rng <= d1:
-                return m0 + (m1 - m0) * (rng - d0) / (d1 - d0) if d1 > d0 else m1
+        for a, b in zip(pts, pts[1:]):
+            d0, m0, out_t = a[0], a[1], (a[2] if len(a) > 2 else 0)
+            cubic = a[4] if len(a) > 4 else 0
+            d1, m1, in_t = b[0], b[1], (b[3] if len(b) > 3 else 0)
+            if rng > d1:
+                continue
+            span = d1 - d0
+            if span == 0:
+                return m1
+            t = (rng - d0) / span
+            if not cubic:
+                return m0 + (m1 - m0) * t
+            t2, t3 = t * t, t * t * t
+            return ((2 * t3 - 3 * t2 + 1) * m0 + (t3 - 2 * t2 + t) * out_t * span
+                    + (-2 * t3 + 3 * t2) * m1 + (t3 - t2) * in_t * span)
         return pts[-1][1]
+
+    FLIGHT_MAX = 2000  # metres simulated
+
+    def flight(self, w, cal):
+        """Bullet flight tables, one entry per metre: time (ms) and speed (m/s). MetaForge's model:
+        each metre, speed -= 0.5*rho*A*Cd(v)*dragCoefficient/mass * v (never below 10 m/s)."""
+        key = (w.get("slug"), cal.get("key"))
+        if key in self._flight:
+            return self._flight[key]
+        v0 = w.get("muzzleVelocity")
+        step = None
+        if v0:
+            curve = (self.raw.get("dragCurves") or {}).get(cal.get("dragModel") or "")
+            if cal.get("dragModel"):
+                if curve and cal.get("mass") and cal.get("diameter"):
+                    def cd(v):
+                        if v <= curve[0][0]:
+                            return curve[0][1]
+                        for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
+                            if v <= x1:
+                                return y0 + (v - x0) / (x1 - x0) * (y1 - y0)
+                        return curve[-1][1]
+                    k = 0.5 * 1.225 * math.pi * (cal["diameter"] / 200) ** 2 * (cal.get("dragCoefficient") or 1) / cal["mass"]
+                    step = lambda v: max(v - k * cd(v) * v, 10)
+            else:
+                decay = math.exp(-(cal.get("speedDecay") or 0))
+                step = lambda v: v * decay
+        table = None
+        if step:
+            times, speeds, t, v = [0.0], [float(v0)], 0.0, float(v0)
+            for _ in range(self.FLIGHT_MAX):
+                t += 1000 / v
+                v = step(v)
+                times.append(t)
+                speeds.append(v)
+            table = (times, speeds)
+        self._flight[key] = table
+        return table
+
+    def _at(self, arr, rng):
+        x = min(max(rng, 0), self.FLIGHT_MAX)
+        i = int(x)
+        return arr[i] + (x - i) * (arr[min(i + 1, self.FLIGHT_MAX)] - arr[i])
+
+    def flight_ms(self, w, cal, rng):
+        table = self.flight(w, cal)
+        if table:
+            return self._at(table[0], rng) if rng > 0 else 0.0
+        v = w.get("muzzleVelocity")
+        return rng / v * 1000 if v else 0.0
+
+    def range_mult(self, w, cal, rng):
+        """Falloff x speed factor: damage drops once the bullet is slower than its typical speed."""
+        mult = self.falloff(w, rng)
+        typical = w.get("typicalSpeed") or cal.get("typicalSpeed")
+        table = self.flight(w, cal)
+        if typical and w.get("weaponClass") and table:
+            mult *= min(1.0, self._at(table[1], rng) / typical)
+        return mult
 
     def hit(self, w, rnd, zone, armor=None, rng=50, cal_key=None):
         cal = self.calibres.get(cal_key, {}) if cal_key else self.calibre(w)
         base = cal.get("baseDamage")
         if not base:
             return None
+        cal_key = cal.get("key") or cal_key or w.get("calibre")
         rnd = self.effective_round(w, rnd, cal_key)
         c = self.combat(cal, rnd)
-        pellets = cal.get("pellets") or 1  # buckshot: every pellet assumed to hit, like MetaForge
-        base = base * pellets
-        raw = base * self.zone_mult(w, zone) * self.falloff(w, rng)
-        bare = raw * c["bare"]
+        base = base * (cal.get("pellets") or 1)  # buckshot: every pellet assumed to hit, like MetaForge
+        h = self.range_mult(w, cal, rng)
+        raw = base * self.zone_mult(w, zone) * h
+        # Season 2: weapon-specific rules (e.g. TCX-SPR -12% with 7.62x39) and zone-only calibre rules
+        extra = list((w.get("rules") or {}).get(cal_key, []))
+        extra += [r for r in cal.get("rules") or [] if r.get("zones")]
+        bare = max(0.0, raw * c["bare"] * rules_mult(extra, rnd, None, zone))
         if armor:
-            dmg = raw * c["vsTier"].get(armor["tier"], 1) * (1 - armor["reduction"] / 100 * c["penScalar"])
-            # plate wears by base * plate multiplier per hit; once broken, hits do bare damage
-            wear = base * self.falloff(w, rng) * c["plateHelmet" if armor["slot"] == "helmet" else "plateArmor"]
+            dmg = max(0.0, raw * c["vsTier"].get(armor["tier"], 1) * rules_mult(extra, rnd, armor["tier"], zone)
+                      * (1 - min(100, armor["reduction"] * c["penScalar"]) / 100))
+            slot = armor["slot"]
+            if "plate" in cal:  # Season 2: calibre plate rules + the weapon's own (snipers wear plates 28% faster)
+                plate_rules = [p for p in cal["plate"] + ((w.get("plate") or {}).get(cal_key) or []) if p.get("slot") == slot]
+                plate = rules_mult(plate_rules, rnd, armor["tier"])
+            else:
+                plate = c["plateHelmet" if slot == "helmet" else "plateArmor"]
+            wear = base * h * plate  # once the plate breaks, hits do unarmored damage
         else:
             dmg, wear = bare, 0
         hp, dur, shots, breaks = self.health, (armor or {}).get("durability", 0), 0, None
-        while hp > 1e-9 and shots < 500:
-            shots += 1
-            if armor and dur > 1e-9:
-                hp -= dmg
-                dur -= wear
-                if dur <= 1e-9:
-                    breaks = shots
-            else:
-                hp -= bare
+        if not armor and bare > 0:
+            shots = math.ceil(hp / bare)
+        else:
+            while hp > 0 and shots < 999:
+                shots += 1
+                if armor and dur > 0:
+                    hp -= dmg
+                    dur -= wear
+                    if dur <= 0 and hp > 0:
+                        breaks = shots
+                else:
+                    hp -= bare
+            if hp > 0:
+                return {"dmg": dmg, "shots": None, "ttk": None, "breaks": breaks}
         rpm = w.get("roundsPerMinute") or 0
-        vel = w.get("muzzleVelocity") or 0
         ttk = None
-        if rpm:
-            # 1.01 ~ drag slowing the bullet; reproduces MetaForge's TTK to the hundredth
-            ttk = round((shots - 1) * 60 / rpm + (rng / vel * 1.01 if vel else 0) + 1e-9, 2)
+        if rpm and shots:
+            ttk = round(((shots - 1) * 60000 / rpm + self.flight_ms(w, cal, rng)) / 1000 + 1e-9, 2)
         return {"dmg": dmg, "shots": shots, "ttk": ttk, "breaks": breaks}
+
+    def weapon_damage(self, w, cal_key=None):
+        """Per-pellet damage this weapon actually does with FMJ before hit zone, range and armor
+        (Season 2 weapon rules applied, e.g. TCX-SPR 34 -> 30, M1911 30 -> 39)."""
+        cal = self.calibres.get(cal_key, {}) if cal_key else self.calibre(w)
+        base = cal.get("baseDamage")
+        if not base:
+            return None
+        key = cal.get("key") or cal_key or w.get("calibre")
+        rules = [r for r in (w.get("rules") or {}).get(key, []) if not r.get("targets") and not r.get("zones")]
+        return base * rules_mult(rules, "FMJ")
 
     def plate_vs_fmj(self, cal, rnd):
         c, f = self.combat(cal, rnd), self.combat(cal, "FMJ")
@@ -333,6 +477,8 @@ def spray_path(w, v_mult=1.0, h_mult=1.0):
     attrs = w.get("attributes") or {}
     v_mult *= attrs.get("VerticalRecoilMultiplier", 1.0)
     h_mult *= attrs.get("HorizontalRecoilMultiplier", 1.0)
+    if w.get("magSize"):
+        pat = pat[: w["magSize"]]  # the pattern can be longer than the mag (TCX-SPR: 30 points, 28 rounds)
     pts, x, y = [(0.0, 0.0)], 0.0, 0.0
     for p in pat:
         x += p["x"] * vk * h_mult

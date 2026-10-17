@@ -18,6 +18,9 @@ ROUNDS = {"FMJ": "FMJ", "HollowPoint": "HP", "ArmorPiercing": "AP"}
 
 def snapshot(ballistics, database, attachment_stats, vehicles=None):
     """Flatten everything into {key: {"group", "item", "stat", "value"}}."""
+    from wardogs import normalize_ballistics
+
+    normalize_ballistics(ballistics)  # Season 2 rule lists -> same per-round table as Season 1
     snap = {}
 
     def put(group, item, stat, value, sub=None):
@@ -35,7 +38,7 @@ def snapshot(ballistics, database, attachment_stats, vehicles=None):
         put("Weapons", n, "mag", w.get("magSize"))
         put("Weapons", n, "moa", w.get("accuracyMoa"))
         put("Weapons", n, "kick", w.get("viewKickMultiplier"))
-        pat = w.get("recoilPattern") or []
+        pat = (w.get("recoilPattern") or [])[: w.get("magSize") or None]
         if pat:
             put("Weapons", n, "climb", sum(p["y"] for p in pat) * (w.get("viewKickMultiplier") or 1))
     for k, c in ballistics.get("calibres", {}).items():

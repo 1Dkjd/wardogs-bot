@@ -99,7 +99,8 @@ def _header(img, d, b, w, icon, zone, rng, width, subtitle_extra="", ctx=None):
     d.text((302, 104), sub, font=F["b"], fill=MUTED)
     x = 300
     pellets = cal.get("pellets") or 1
-    chips = [f"{cal.get('baseDamage', '?')}{f'×{pellets}' if pellets > 1 else ''} DMG",
+    wd = b.weapon_damage(w)
+    chips = [f"{wd:.0f}{f'×{pellets}' if pellets > 1 else ''} DMG" if wd else "? DMG",
              f"{w['roundsPerMinute']:g} RPM" if w.get("roundsPerMinute") else None,
              f"{w['muzzleVelocity']} M/S" if w.get("muzzleVelocity") else None,
              f"{w['magSize']} RND" if w.get("magSize") else None]
@@ -151,7 +152,7 @@ def ammo_card(b, w, zone, rng, weapon_icon=None, round_icons=None):
     y = y0 + colhead_h
     for label, armor in rows:
         hits = [b.hit(w, o["rnd"], zone, armor, rng, o["cal"]) for o in opts]
-        best = _winners([(h["shots"], h["ttk"] or 0) if h else None for h in hits])
+        best = _winners([(h["shots"], h["ttk"] or 0) if h and h["shots"] else None for h in hits])
         d.text((pad, y + row_h / 2 - 9), label, font=F["b"], fill=TEXT, anchor="lm")
         if armor:
             d.text((pad, y + row_h / 2 + 14), f"blocks {armor['reduction']}% · {armor['durability']} dur",
@@ -164,11 +165,11 @@ def ammo_card(b, w, zone, rng, weapon_icon=None, round_icons=None):
                 d.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), "—", font=F["h"], fill=DIM, anchor="mm")
                 continue
             col = stk_color(h["shots"])
-            num = f"{h['shots']}{'*' if h['breaks'] else ''}"
+            num = f"{h['shots'] or '∞'}{'*' if h['breaks'] else ''}"
             d.text((box[0] + 18, (box[1] + box[3]) / 2 - 1), num, font=F["big"], fill=col, anchor="lm")
             nx = box[0] + 22 + d.textlength(num, font=F["big"])
             d.text((nx, (box[1] + box[3]) / 2 - 10), "SHOTS" if h["shots"] != 1 else "SHOT", font=F["s"], fill=MUTED, anchor="lm")
-            d.text((nx, (box[1] + box[3]) / 2 + 10), f"{h['ttk']:.2f}s" if h["ttk"] is not None else "", font=F["s"], fill=DIM, anchor="lm")
+            d.text((nx, (box[1] + box[3]) / 2 + 10), f"{h['ttk']:.2f}s" if h["ttk"] is not None else "can't kill", font=F["s"], fill=DIM, anchor="lm")
             d.text((box[2] - 16, (box[1] + box[3]) / 2 - 10), f"{h['dmg']:.0f}", font=F["h"], fill=TEXT, anchor="rm")
             d.text((box[2] - 16, (box[1] + box[3]) / 2 + 13), "DMG/HIT", font=F["s"], fill=DIM, anchor="rm")
             if i in best:
@@ -209,8 +210,9 @@ def compare_card(b, weapons, rnd, zone, rng, icons=None):
     col_w = (W - 2 * pad - label_w) / len(weapons)
     stat_rows = [
         ("Calibre", lambda w: b.calibre(w).get("label", "?"), None),
-        ("Base damage", lambda w: (f"{b.calibre(w).get('baseDamage')} ×{b.calibre(w)['pellets']}"
-                                   if (b.calibre(w).get("pellets") or 1) > 1 else b.calibre(w).get("baseDamage")), "hi"),
+        ("Damage", lambda w: (f"{b.weapon_damage(w):.0f} ×{b.calibre(w)['pellets']}"
+                              if (b.calibre(w).get("pellets") or 1) > 1
+                              else (round(b.weapon_damage(w)) if b.weapon_damage(w) else None)), "hi"),
         ("Fire rate", lambda w: w.get("roundsPerMinute"), "hi"),
         ("Velocity", lambda w: w.get("muzzleVelocity"), "hi"),
         ("Eff. range", lambda w: w.get("effectiveRange"), "hi"),
@@ -279,7 +281,7 @@ def compare_card(b, weapons, rnd, zone, rng, icons=None):
             if not h:
                 d.text(((box[0] + box[2]) / 2, mid), "—", font=F["h"], fill=DIM, anchor="mm")
                 continue
-            num = f"{h['shots']}{'*' if h['breaks'] else ''}"
+            num = f"{h['shots'] or '∞'}{'*' if h['breaks'] else ''}"
             d.text((box[0] + 18, mid), num, font=F["big"], fill=stk_color(h["shots"]), anchor="lm")
             nx = box[0] + 22 + d.textlength(num, font=F["big"])
             d.text((nx, mid - 9), "SHOTS" if h["shots"] != 1 else "SHOT", font=F["s"], fill=MUTED, anchor="lm")
