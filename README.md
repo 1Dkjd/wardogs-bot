@@ -7,13 +7,16 @@ Discord bot for [WARDOGS](https://store.steampowered.com/) built on MetaForge's 
 | `/gold` | Gold bar rate card: 1D/7D/30D change, buy signal, skin prices |
 | `/cost bars:30` | Cash cost of N bars (today / all-time low / high) and which Gold Market items fit |
 | `/chart` | Gold price history card with 7D / 30D / 90D / ALL buttons |
-| `/compare m4 ak74 [weapon3]` | Side-by-side card, shots to kill vs every armor tier; zone, round and distance buttons |
-| `/ammo deagle` | FMJ vs HP vs AP (or slug vs buckshot) card; zone and distance buttons |
-| `/weapon m4` | Spray pattern, stock vs best build, and the best recoil attachment per slot |
+| `/compare m4 ak74 [weapon3]` | Side-by-side card, shots to kill vs every armor tier; zone, round and distance buttons, plus dropdowns to swap or add guns |
+| `/ammo deagle` | FMJ vs HP vs AP (or slug vs buckshot) card; zone and distance buttons, jump to Spray or Compare |
+| `/weapon m4` | Spray pattern, stock vs best build, and the best recoil attachment per slot; jump to Ammo or Compare |
 | `/vehicle l2a6` | What kills a vehicle on foot (mines, launchers, C4...) and how many hits; **Where to shoot** button shows every zone's armor, HP and ≈hits |
 | `/changes` | Latest balance patch the bot spotted |
 | `/help` | Command overview |
 | `/selftest` | (bot owner only) run every command against MetaForge now |
+
+**Weapon names:** nicknames and typos work: `ak`, `mosin`, `bizon`, `saw`, `dragunov`, `spr`, `mosn`... If a name
+is ambiguous (`ggx`) the bot asks which one you meant.
 
 **Owner alerts:** if a command or background job fails, the bot DMs its owner (the Discord app owner, or `OWNER_ID`)
 the error and where it happened, at most once per 30 min per error. A self-test renders every command against

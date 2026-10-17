@@ -54,8 +54,13 @@ async def error(inter: discord.Interaction, msg: str):
     await send(f"⚠️ {msg}", ephemeral=True)
 
 
+def not_found(b, q):
+    alts = b.suggest(q)
+    return f"Couldn't find a weapon called **{q}**." + (f" Did you mean {', '.join(f'**{a}**' for a in alts)}?" if alts else "")
+
+
 async def send_card(inter, kind, slugs, rnd, zone, rng):
-    view = views.CardView(mf, kind, slugs, rnd, zone, rng)
+    view = views.CardView(mf, kind, slugs, rnd, zone, rng, b=await mf.ballistics())
     file = await views.render(mf, kind, slugs, rnd, zone, rng)
     view.message = await inter.followup.send(file=file, view=view, wait=True)
 
@@ -100,7 +105,7 @@ async def compare(inter: discord.Interaction, weapon1: str, weapon2: str, weapon
     for q in filter(None, [weapon1, weapon2, weapon3]):
         w = b.find_weapon(q)
         if not w:
-            return await error(inter, f"Couldn't find a weapon called **{q}**.")
+            return await error(inter, not_found(b, q))
         ws.append(w)
     await send_card(inter, "compare", [w["slug"] for w in ws], round.value if round else "FMJ",
                     zone.value if zone else "torso_upper", distance)
@@ -117,7 +122,7 @@ async def ammo(inter: discord.Interaction, weapon: str, zone: app_commands.Choic
     b = await mf.ballistics()
     w = b.find_weapon(weapon)
     if not w:
-        return await error(inter, f"Couldn't find a weapon called **{weapon}**.")
+        return await error(inter, not_found(b, weapon))
     if not b.calibre(w).get("baseDamage"):
         return await error(inter, f"MetaForge has no ammo damage data for **{w['name']}**.")
     await send_card(inter, "ammo", [w["slug"]], "FMJ", zone.value if zone else "torso_upper", distance)
@@ -131,7 +136,7 @@ async def weapon(inter: discord.Interaction, weapon: str):
     b = await mf.ballistics()
     w = b.find_weapon(weapon)
     if not w:
-        return await error(inter, f"Couldn't find a weapon called **{weapon}**.")
+        return await error(inter, not_found(b, weapon))
     await send_card(inter, "weapon", [w["slug"]], "FMJ", "torso_upper", 50)
 
 

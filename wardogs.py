@@ -10,6 +10,7 @@ Damage model (verified against metaforge.app/wardogs/ballistics):
   ttk     = (shots - 1) * 60 / rpm + travel time (range / velocity, +1% for drag)
   buckshot multiplies damage and plate wear by the pellet count (all pellets hit)
 """
+import difflib
 import math
 import os
 import re
@@ -171,6 +172,21 @@ def normalize_ballistics(raw):
     return raw
 
 
+# Nicknames people actually type. Spacing/hyphens/case don't matter (compared via _norm).
+WEAPON_ALIASES = {
+    "ak74": ["ak", "ak-74", "ak74m"], "m4": ["m4a1", "m4 carbine"], "mosin-nagant": ["mosin", "nagant"],
+    "pp-19-bizon": ["bizon"], "pp-19-vityaz": ["vityaz"], "m249-saw": ["saw", "m249"],
+    "deagle": ["desert eagle", "de", "50 ae"], "m1911": ["1911", "colt"], "amr-50": ["amr", "50 cal", "barrett"],
+    "tcx-spr": ["tcx", "spr"], "evo-3-ultra": ["evo", "evo3"], "scout-rifle-td": ["scout"],
+    "svd": ["dragunov"], "sv98": ["sv-98"], "mk22": ["mk 22"], "kh-2002": ["kh2002", "khaybar"],
+    "bushmaster-m17s": ["bushmaster", "m17s", "m17"], "compound-bow": ["bow"], "m500": ["mossberg", "500"],
+    "mp43": ["mp-43"], "9k333-verba": ["verba", "manpads"], "maaws": ["carl gustaf", "gustaf", "carl g"],
+    "mgl-40": ["mgl", "grenade launcher"], "rpg-7": ["rpg"], "bmr-308": ["bmr", "308"], "super-45": ["super45"],
+    "a-91": ["a91"], "t-21": ["t21"], "amp-9": ["amp9", "amp"], "ggx-17": ["glock 17", "g17"],
+    "ggx-18": ["glock 18", "g18"], "judge": ["taurus judge"], "m14": ["m14 ebr", "ebr"], "fal": ["fn fal"],
+}
+
+
 class Ballistics:
     def __init__(self, raw):
         self.raw = normalize_ballistics(raw)
@@ -183,18 +199,53 @@ class Ballistics:
 
     # ---------- lookups ----------
     def find_weapon(self, q):
-        q = (q or "").strip().lower()
-        if q in self.weapons:
-            return self.weapons[q]
-        for w in self.weapons.values():
-            if w["name"].lower() == q or w["slug"].replace("-", "") == q.replace("-", "").replace(" ", ""):
-                return w
-        return None
+        """Exact slug/name, a nickname ("ak", "mosin", "bizon"), a unique partial name, or a close typo."""
+        hits = self._rank(q)
+        if not hits:
+            return None
+        score, w = hits[0]
+        if score >= 3 or len(hits) == 1 or hits[1][0] < score:
+            return w
+        return None  # ambiguous, e.g. "ggx" -> GGX 17 / GGX 18
 
     def search_weapons(self, q, limit=25):
-        q = (q or "").lower()
-        out = [w for w in self.weapons.values() if q in w["name"].lower() or q in w["slug"]]
-        return sorted(out, key=lambda w: w["name"])[:limit]
+        """Autocomplete: best matches first, falls back to typo matching."""
+        if not (q or "").strip():
+            return sorted(self.weapons.values(), key=lambda w: w["name"])[:limit]
+        return [w for _, w in self._rank(q)][:limit]
+
+    def suggest(self, q, n=3):
+        return [w["name"] for _, w in self._rank(q)][:n]
+
+    def _rank(self, q):
+        """[(score, weapon)] best first. 4 exact, 3 nickname, 2/1.5 starts with, 1/0.9 contains, <0.7 typo."""
+        nq = _norm(q)
+        if not nq:
+            return []
+        out = []
+        for w in self.weapons.values():
+            names = {_norm(w["slug"]), _norm(w["name"])}
+            nicks = {_norm(a) for a in WEAPON_ALIASES.get(w["slug"], ())}
+            if nq in names:
+                score = 4
+            elif nq in nicks:
+                score = 3
+            elif any(n.startswith(nq) for n in names):
+                score = 2
+            elif any(n.startswith(nq) for n in nicks):
+                score = 1.5
+            elif any(nq in n for n in names):
+                score = 1
+            elif any(nq in n for n in nicks):
+                score = 0.9
+            else:
+                r = max(difflib.SequenceMatcher(None, nq, n).ratio() for n in names | nicks)
+                if r < 0.7:
+                    continue
+                score = r - 0.3  # 0.4-0.7, always below a real partial match
+            out.append((score, w))
+        out.sort(key=lambda t: (-t[0], t[1]["name"]))
+        return out
 
     def calibre(self, w):
         return self.calibres.get(w.get("calibre"), {})

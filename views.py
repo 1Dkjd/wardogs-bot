@@ -92,17 +92,91 @@ class DistanceButton(discord.ui.Button):
         await self.view.refresh(inter)
 
 
+RIFLE_CLASSES = ("Assault Rifle", "Marksman Rifle", "Sniper Rifle")
+GUN_PICKERS = [  # two dropdowns because Discord caps one at 25 options
+    ("Rifles", lambda c: c in RIFLE_CLASSES),
+    ("Pistols, SMGs, shotguns, LMGs", lambda c: c and c not in RIFLE_CLASSES),
+]
+
+
+class GunSelect(discord.ui.Select):
+    """Tick/untick guns to swap, add or remove them from /compare (2-3 guns)."""
+
+    def __init__(self, label, guns, current, row):
+        guns = guns[:25]
+        self.guns = {w["slug"] for w in guns}
+        super().__init__(
+            placeholder=f"Swap or add guns: {label}", row=row, min_values=0, max_values=min(3, len(guns)),
+            options=[discord.SelectOption(label=w["name"], value=w["slug"], description=w.get("weaponClass"),
+                                          default=w["slug"] in current) for w in guns],
+        )
+
+    async def callback(self, inter: discord.Interaction):
+        view = self.view
+        keep = [s for s in view.slugs if s not in self.guns]  # guns from the other dropdown stay
+        picked = keep + [s for s in self.values if s not in keep]
+        if len(picked) < 2 or len(picked) > 3:
+            view._build()  # put the ticks back the way they were
+            await inter.response.edit_message(view=view)
+            msg = "Compare needs at least 2 guns." if len(picked) < 2 else "Max 3 guns: untick one first, then add the new one."
+            return await inter.followup.send(f"⚠️ {msg}", ephemeral=True)
+        # keep the order people already see, new guns go on the end
+        view.slugs = [s for s in view.slugs if s in picked] + [s for s in picked if s not in view.slugs]
+        await view.refresh(inter)
+
+
+class JumpButton(discord.ui.Button):
+    """Switch the same message to another card for this gun."""
+
+    def __init__(self, label, kind, row, emoji=None):
+        super().__init__(label=label, row=row, emoji=emoji, style=discord.ButtonStyle.secondary)
+        self.kind = kind
+
+    async def callback(self, inter: discord.Interaction):
+        view = self.view
+        gun = view.slugs[0]
+        if self.kind == "compare":
+            b = await view.mf.ballistics()
+            view.slugs = [gun, rival(b, gun)]
+        else:
+            view.slugs = [gun]
+        view.kind = self.kind
+        await view.refresh(inter)
+
+
+def rival(b, slug):
+    """A sensible gun to compare against: same class, closest damage per second."""
+    w = b.weapons[slug]
+
+    def dps(x):
+        return (b.weapon_damage(x) or 0) * (b.calibre(x).get("pellets") or 1) * (x.get("roundsPerMinute") or 0)
+
+    pool = [x for x in b.weapons.values() if x["slug"] != slug and can_shoot(b, x["slug"])]
+    same = [x for x in pool if x.get("weaponClass") == w.get("weaponClass")] or pool
+    return min(same, key=lambda x: (abs(dps(x) - dps(w)), x["name"]))["slug"]
+
+
+def can_shoot(b, slug):
+    w = b.weapons.get(slug)
+    return bool(w and w.get("weaponClass") and b.weapon_damage(w))
+
+
 class CardView(discord.ui.View):
-    def __init__(self, mf, kind, slugs, rnd="FMJ", zone="torso_upper", rng=50):
+    def __init__(self, mf, kind, slugs, rnd="FMJ", zone="torso_upper", rng=50, b=None):
         super().__init__(timeout=900)
         self.mf, self.kind, self.slugs = mf, kind, slugs
         self.rnd, self.zone, self.rng = rnd, zone, rng
+        self.b = b  # ballistics, for the gun dropdowns and jump buttons
         self.message = None
         self._build()
 
     def _build(self):
         self.clear_items()
+        b = self.b
         if self.kind == "weapon":
+            if b and can_shoot(b, self.slugs[0]):
+                self.add_item(JumpButton("Ammo damage", "ammo", 0, "💥"))
+                self.add_item(JumpButton("Compare", "compare", 0, "⚖️"))
             url = f"{SITE}/database/weapons/{self.slugs[0]}"
             self.add_item(discord.ui.Button(label="View on MetaForge", url=url, row=0))
             return
@@ -110,14 +184,26 @@ class CardView(discord.ui.View):
         if self.kind == "compare":
             for r in ROUNDS:
                 self.add_item(RoundButton(r, self.rnd))
+        else:
+            self.add_item(JumpButton("Spray & attachments", "weapon", 1, "🎯"))
+            if b:
+                self.add_item(JumpButton("Compare", "compare", 1, "⚖️"))
         for m in DISTANCES:
             self.add_item(DistanceButton(m, self.rng))
         url = f"{SITE}/ballistics?w={','.join(self.slugs)}&round={ROUND_SHORT[self.rnd]}&range={self.rng}"
         self.add_item(discord.ui.Button(label="MetaForge", url=url, row=2))
+        if self.kind == "compare" and b:
+            guns = sorted((w for w in b.weapons.values() if can_shoot(b, w["slug"])),
+                          key=lambda w: (w.get("weaponClass") or "", w["name"]))
+            for i, (label, fits) in enumerate(GUN_PICKERS):
+                pick = [w for w in guns if fits(w.get("weaponClass"))]
+                if pick:
+                    self.add_item(GunSelect(label, pick, set(self.slugs), 3 + i))
 
     async def refresh(self, inter: discord.Interaction):
         await inter.response.defer()
         try:
+            self.b = await self.mf.ballistics()
             file = await render(self.mf, self.kind, self.slugs, self.rnd, self.zone, self.rng)
         except Exception:
             log.exception("Re-render failed")
